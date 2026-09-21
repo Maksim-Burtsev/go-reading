@@ -16,7 +16,8 @@ endif
 
 test-integration:
 ifneq ($(PKGS),)
-	go test -race -tags integration ./...
+	DOCKER_HOST="$${DOCKER_HOST:-$$(docker context inspect --format '{{.Endpoints.docker.Host}}' 2>/dev/null)}" \
+		go test -race -tags integration ./...
 endif
 
 run-%:
