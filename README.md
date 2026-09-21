@@ -31,6 +31,7 @@ Each application has a `READING.md`: where to start, the data flow, Go-specific 
 - [01-cli-wordfreq](apps/01-cli-wordfreq/READING.md) — cobra CLI: word frequency and dedupe, bounded errgroup fan-out, tabwriter.
 - [02-http-notes](apps/02-http-notes/READING.md) — net/http JSON CRUD: ServeMux `{id}` routing, middleware chain, validator, graceful shutdown.
 - [03-ratelimiter](apps/03-ratelimiter/READING.md) — token bucket and sliding window behind one interface, fake clock, `X-RateLimit-*` middleware.
+- [04-worker-pool](apps/04-worker-pool/READING.md) — webhook dispatcher: bounded queue, errgroup workers, backoff with jitter, graceful drain, goleak.
 
 ## Review branches
 
