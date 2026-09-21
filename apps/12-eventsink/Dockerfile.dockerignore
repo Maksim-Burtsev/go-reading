@@ -1,0 +1,5 @@
+*
+!go.mod
+!go.sum
+!apps/12-eventsink/
+apps/12-eventsink/**/*_test.go

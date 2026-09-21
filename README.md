@@ -39,6 +39,7 @@ Each application has a `READING.md`: where to start, the data flow, Go-specific 
 - [09-cron-worker](apps/09-cron-worker/READING.md) — robfig/cron jobs under Postgres advisory locks, duration metrics, fake clock.
 - [10-tui-app](apps/10-tui-app/READING.md) — bubbletea + lipgloss: two-pane task list with a filter, `Update` tested as a pure function.
 - [11-clickhouse-sink](apps/11-clickhouse-sink/READING.md) — HTTP ingest into ClickHouse batches, 429 backpressure, Prometheus metrics, health check.
+- [12-eventsink](apps/12-eventsink/READING.md) — Kafka → ClickHouse batches with Postgres batch ledger, idempotent replay, distroless image, ADR-001.
 
 ## Review branches
 
