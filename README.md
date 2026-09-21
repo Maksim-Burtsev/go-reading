@@ -37,6 +37,7 @@ Each application has a `READING.md`: where to start, the data flow, Go-specific 
 - [07-kafka-consumer](apps/07-kafka-consumer/READING.md) — franz-go consumer group: size/time batching, commit after write, retries, dead-letter topic.
 - [08-grpc-service](apps/08-grpc-service/READING.md) — buf-generated gRPC inventory: server streaming, interceptors, deadlines, status codes, bufconn.
 - [09-cron-worker](apps/09-cron-worker/READING.md) — robfig/cron jobs under Postgres advisory locks, duration metrics, fake clock.
+- [10-tui-app](apps/10-tui-app/READING.md) — bubbletea + lipgloss: two-pane task list with a filter, `Update` tested as a pure function.
 
 ## Review branches
 

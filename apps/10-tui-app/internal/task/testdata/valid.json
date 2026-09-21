@@ -1,0 +1,27 @@
+{
+  "tasks": [
+    {
+      "id": "API-1031",
+      "title": "Paginate GET /v2/invoices with an opaque cursor",
+      "status": "todo",
+      "priority": "high",
+      "tags": ["api", "billing"],
+      "due": "2026-09-30",
+      "description": "Replace offset pagination with a keyset cursor."
+    },
+    {
+      "id": "OPS-97",
+      "title": "Alert on consumer lag above five minutes",
+      "status": "done",
+      "priority": "medium",
+      "tags": ["oncall"],
+      "due": null
+    },
+    {
+      "id": "WEB-334",
+      "title": "Upgrade the admin panel to the new design tokens",
+      "status": "in_progress",
+      "priority": "low"
+    }
+  ]
+}

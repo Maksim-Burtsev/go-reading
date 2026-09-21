@@ -1,0 +1,168 @@
+{
+  "tasks": [
+    {
+      "id": "PLAT-412",
+      "title": "Rotate TLS certificates on the edge proxies",
+      "status": "in_progress",
+      "priority": "high",
+      "tags": [
+        "security",
+        "infra"
+      ],
+      "due": "2026-09-18",
+      "description": "The wildcard certificate for *.api.internal expires on 30 September. Issue the new certificate through the ACME issuer, roll it out to the staging proxies first, watch the handshake error rate for an hour, then roll to production one availability zone at a time. Keep the old certificate in the bundle until every client pool has reconnected."
+    },
+    {
+      "id": "PLAT-418",
+      "title": "Move session store from Redis 6 to Valkey 8",
+      "status": "todo",
+      "priority": "medium",
+      "tags": [
+        "infra",
+        "migration"
+      ],
+      "due": "2026-10-09",
+      "description": "Dual-write sessions for one week, compare hit rates, then switch reads. The TTL semantics are identical; the only client change is the connection string and the TLS config."
+    },
+    {
+      "id": "API-1031",
+      "title": "Paginate GET /v2/invoices with an opaque cursor",
+      "status": "todo",
+      "priority": "high",
+      "tags": [
+        "api",
+        "billing"
+      ],
+      "due": "2026-09-30",
+      "description": "Offset pagination times out for tenants with more than 200k invoices. Replace it with a keyset cursor over (issued_at, id), encode the cursor as base64 JSON, and keep offset working for one release behind a deprecation header."
+    },
+    {
+      "id": "API-1034",
+      "title": "Return 409 instead of 500 on duplicate idempotency keys",
+      "status": "done",
+      "priority": "medium",
+      "tags": [
+        "api",
+        "bug"
+      ],
+      "due": "2026-09-12",
+      "description": "The unique violation from Postgres leaked as an internal error. Map SQLSTATE 23505 on the idempotency_keys index to a conflict response with the original request id in the body."
+    },
+    {
+      "id": "API-1040",
+      "title": "Add rate limit headers to public endpoints",
+      "status": "todo",
+      "priority": "low",
+      "tags": [
+        "api",
+        "dx"
+      ],
+      "description": "Expose RateLimit-Limit, RateLimit-Remaining and RateLimit-Reset following the IETF draft so client SDKs can back off without guessing."
+    },
+    {
+      "id": "DATA-207",
+      "title": "Backfill churn features for the Q3 model retrain",
+      "status": "in_progress",
+      "priority": "medium",
+      "tags": [
+        "data",
+        "ml"
+      ],
+      "due": "2026-09-26",
+      "description": "Run the feature job for July through September in daily partitions. The job is idempotent per partition; restart failed days individually instead of rerunning the whole range."
+    },
+    {
+      "id": "DATA-211",
+      "title": "Drop the unused events_raw_v1 table",
+      "status": "todo",
+      "priority": "low",
+      "tags": [
+        "data",
+        "cleanup"
+      ],
+      "due": "2026-10-31",
+      "description": "No reads in 90 days according to the query log. Snapshot to cold storage, revoke grants for two weeks, then drop."
+    },
+    {
+      "id": "OPS-95",
+      "title": "Write the runbook for payment webhook backlog",
+      "status": "todo",
+      "priority": "high",
+      "tags": [
+        "oncall",
+        "billing",
+        "docs"
+      ],
+      "due": "2026-09-19",
+      "description": "Last incident took 40 minutes because nobody knew the replay endpoint existed. Document how to spot the backlog on the dashboard, how to pause consumers, how to replay a time window, and who to page at the payment provider."
+    },
+    {
+      "id": "OPS-97",
+      "title": "Alert on consumer lag above five minutes",
+      "status": "done",
+      "priority": "medium",
+      "tags": [
+        "oncall",
+        "kafka"
+      ],
+      "due": "2026-09-05"
+    },
+    {
+      "id": "SEC-58",
+      "title": "Remove long-lived AWS keys from CI",
+      "status": "in_progress",
+      "priority": "high",
+      "tags": [
+        "security",
+        "ci"
+      ],
+      "due": "2026-09-25",
+      "description": "Switch every pipeline to OIDC federation with per-repository roles. Two pipelines still use static keys for the artifact bucket; migrate them and delete the IAM user."
+    },
+    {
+      "id": "WEB-330",
+      "title": "Fix timezone drift in the scheduled reports email",
+      "status": "todo",
+      "priority": "medium",
+      "tags": [
+        "bug",
+        "reports"
+      ],
+      "due": "2026-10-02",
+      "description": "Reports scheduled for 09:00 arrive at 10:00 for tenants in zones that observe daylight saving time. The scheduler stores the next run in UTC computed once at creation; compute it from the tenant zone on every run instead."
+    },
+    {
+      "id": "WEB-334",
+      "title": "Upgrade the admin panel to the new design tokens",
+      "status": "todo",
+      "priority": "low",
+      "tags": [
+        "frontend"
+      ],
+      "due": "2026-11-14"
+    },
+    {
+      "id": "HR-12",
+      "title": "Prepare onboarding checklist for two new backend hires",
+      "status": "todo",
+      "priority": "medium",
+      "tags": [
+        "team",
+        "docs"
+      ],
+      "due": "2026-10-05",
+      "description": "Laptop setup, access requests, first-week reading list, and a starter issue for each person. Pair each new hire with a buddy from a different squad."
+    },
+    {
+      "id": "PLAT-420",
+      "title": "Enable pgBouncer transaction pooling for the reporting replica",
+      "status": "todo",
+      "priority": "medium",
+      "tags": [
+        "infra",
+        "postgres"
+      ],
+      "description": "The reporting service opens a connection per request and exhausts max_connections at month end. Check for session-level state first: prepared statements and advisory locks break under transaction pooling."
+    }
+  ]
+}
