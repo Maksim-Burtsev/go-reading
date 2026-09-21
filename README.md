@@ -33,6 +33,7 @@ Each application has a `READING.md`: where to start, the data flow, Go-specific 
 - [03-ratelimiter](apps/03-ratelimiter/READING.md) — token bucket and sliding window behind one interface, fake clock, `X-RateLimit-*` middleware.
 - [04-worker-pool](apps/04-worker-pool/READING.md) — webhook dispatcher: bounded queue, errgroup workers, backoff with jitter, graceful drain, goleak.
 - [05-lru-cache](apps/05-lru-cache/READING.md) — generic LRU with TTL and OnEvict, benchmarks, read-through caching proxy with singleflight.
+- [06-pg-service](apps/06-pg-service/READING.md) — chi + pgx + sqlc + goose: order transaction, keyset pagination, `PgError` → 409, testcontainers.
 
 ## Review branches
 
