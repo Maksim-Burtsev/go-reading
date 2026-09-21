@@ -1,0 +1,97 @@
+syntax = "proto3";
+
+package inventory.v1;
+
+import "google/protobuf/timestamp.proto";
+
+option go_package = "github.com/Maksim-Burtsev/go-reading/apps/08-grpc-service/gen/inventory/v1;inventoryv1";
+
+// InventoryService exposes warehouse stock levels and reservations.
+//
+// Unary calls sent without a deadline get the server's default timeout.
+service InventoryService {
+  // GetItem returns a single item by SKU.
+  //
+  // Errors:
+  //   INVALID_ARGUMENT  sku is empty.
+  //   NOT_FOUND         no item has this SKU.
+  rpc GetItem(GetItemRequest) returns (GetItemResponse);
+
+  // ListItems streams items in ascending SKU order.
+  //
+  // Errors:
+  //   INVALID_ARGUMENT  limit is negative.
+  rpc ListItems(ListItemsRequest) returns (stream ListItemsResponse);
+
+  // Reserve moves the requested quantities from available to reserved stock.
+  // All lines are reserved together or none are.
+  //
+  // reservation_id is an idempotency key. Repeating a request with the same
+  // reservation_id and the same lines returns the original reservation with OK
+  // and does not reserve again; line order does not matter.
+  //
+  // Errors:
+  //   INVALID_ARGUMENT     reservation_id is empty or longer than 128 bytes,
+  //                        lines is empty or has more than 100 entries,
+  //                        a line has an empty SKU or a non-positive quantity,
+  //                        or a SKU appears in more than one line.
+  //   NOT_FOUND            a line references an unknown SKU.
+  //   FAILED_PRECONDITION  a line asks for more than is available.
+  //   ALREADY_EXISTS       reservation_id was already used with different lines.
+  rpc Reserve(ReserveRequest) returns (ReserveResponse);
+}
+
+// Item is a stock-keeping unit and its current stock levels.
+message Item {
+  string sku = 1;
+  string name = 2;
+  // Units that can still be reserved.
+  int64 available = 3;
+  // Units held by reservations.
+  int64 reserved = 4;
+}
+
+// ReservationLine is a quantity of a single SKU.
+message ReservationLine {
+  string sku = 1;
+  int64 quantity = 2;
+}
+
+// Reservation is a committed hold on stock.
+message Reservation {
+  string id = 1;
+  // Lines sorted by SKU.
+  repeated ReservationLine lines = 2;
+  google.protobuf.Timestamp create_time = 3;
+}
+
+message GetItemRequest {
+  string sku = 1;
+}
+
+message GetItemResponse {
+  Item item = 1;
+}
+
+message ListItemsRequest {
+  // Only items whose SKU starts with this prefix are streamed.
+  string sku_prefix = 1;
+  // Skip items with no available units.
+  bool in_stock_only = 2;
+  // Maximum number of items to stream. Zero means 100; values above 1000
+  // are treated as 1000.
+  int32 limit = 3;
+}
+
+message ListItemsResponse {
+  Item item = 1;
+}
+
+message ReserveRequest {
+  string reservation_id = 1;
+  repeated ReservationLine lines = 2;
+}
+
+message ReserveResponse {
+  Reservation reservation = 1;
+}
