@@ -1,0 +1,21 @@
+version: "2"
+
+run:
+  build-tags:
+    - integration
+
+linters:
+  default: none
+  enable:
+    - bodyclose
+    - contextcheck
+    - errcheck
+    - errorlint
+    - gocritic
+    - gosec
+    - govet
+    - noctx
+    - revive
+    - sqlclosecheck
+    - staticcheck
+    - unused
