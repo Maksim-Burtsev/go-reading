@@ -26,7 +26,9 @@ make run-01-cli-wordfreq ARGS="..."
 
 ## Applications
 
-None yet.
+Each application has a `READING.md`: where to start, the data flow, Go-specific spots and questions.
+
+- [01-cli-wordfreq](apps/01-cli-wordfreq/READING.md) — cobra CLI: word frequency and dedupe, bounded errgroup fan-out, tabwriter.
 
 ## Review branches
 
