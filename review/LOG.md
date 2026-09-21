@@ -1,4 +1,4 @@
 # Review log
 
-| # | Branch | Date | Verdict | Found | Missed |
-|---|--------|------|---------|-------|--------|
+| Date | Branch | Planted | Found | False positives | Minutes | Notes |
+|------|--------|---------|-------|-----------------|---------|-------|

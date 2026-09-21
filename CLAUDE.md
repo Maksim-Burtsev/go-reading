@@ -9,8 +9,8 @@ Everything in this repository is in English: code, comments, commit messages, do
 ## Tooling
 - Go 1.27. A single go.mod at the root; each application is its own directory
   `apps/NN-name/` with its own `cmd/` and `internal/`.
-- Before every commit: `gofmt -l .`, `go vet ./...`, `golangci-lint run`, `go test -race ./...`.
-  Everything must be clean. Do not commit if anything is red.
+- Before every commit: `make lint test` (`gofmt -l .`, `go vet ./...`, `golangci-lint run`,
+  `go test -race ./...`). Everything must be clean. Do not commit if anything is red.
 - Linter: `.golangci.yml` at the root, with errcheck, govet, staticcheck, gocritic,
   errorlint, bodyclose, noctx, sqlclosecheck, contextcheck, gosec, revive, unused enabled.
 
