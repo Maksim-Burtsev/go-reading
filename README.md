@@ -36,6 +36,7 @@ Each application has a `READING.md`: where to start, the data flow, Go-specific 
 - [06-pg-service](apps/06-pg-service/READING.md) — chi + pgx + sqlc + goose: order transaction, keyset pagination, `PgError` → 409, testcontainers.
 - [07-kafka-consumer](apps/07-kafka-consumer/READING.md) — franz-go consumer group: size/time batching, commit after write, retries, dead-letter topic.
 - [08-grpc-service](apps/08-grpc-service/READING.md) — buf-generated gRPC inventory: server streaming, interceptors, deadlines, status codes, bufconn.
+- [09-cron-worker](apps/09-cron-worker/READING.md) — robfig/cron jobs under Postgres advisory locks, duration metrics, fake clock.
 
 ## Review branches
 
