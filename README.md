@@ -34,6 +34,7 @@ Each application has a `READING.md`: where to start, the data flow, Go-specific 
 - [04-worker-pool](apps/04-worker-pool/READING.md) — webhook dispatcher: bounded queue, errgroup workers, backoff with jitter, graceful drain, goleak.
 - [05-lru-cache](apps/05-lru-cache/READING.md) — generic LRU with TTL and OnEvict, benchmarks, read-through caching proxy with singleflight.
 - [06-pg-service](apps/06-pg-service/READING.md) — chi + pgx + sqlc + goose: order transaction, keyset pagination, `PgError` → 409, testcontainers.
+- [07-kafka-consumer](apps/07-kafka-consumer/READING.md) — franz-go consumer group: size/time batching, commit after write, retries, dead-letter topic.
 
 ## Review branches
 

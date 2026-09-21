@@ -1,0 +1,17 @@
+services:
+  redpanda:
+    image: redpandadata/redpanda:v25.1.1
+    command:
+      - redpanda
+      - start
+      - --mode=dev-container
+      - --smp=1
+      - --kafka-addr=0.0.0.0:9092
+      - --advertise-kafka-addr=localhost:9092
+    ports:
+      - "9092:9092"
+    healthcheck:
+      test: ["CMD", "rpk", "cluster", "health", "--exit-when-healthy"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
