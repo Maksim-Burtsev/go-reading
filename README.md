@@ -29,6 +29,7 @@ make run-01-cli-wordfreq ARGS="..."
 Each application has a `READING.md`: where to start, the data flow, Go-specific spots and questions.
 
 - [01-cli-wordfreq](apps/01-cli-wordfreq/READING.md) — cobra CLI: word frequency and dedupe, bounded errgroup fan-out, tabwriter.
+- [02-http-notes](apps/02-http-notes/READING.md) — net/http JSON CRUD: ServeMux `{id}` routing, middleware chain, validator, graceful shutdown.
 
 ## Review branches
 
