@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"net"
 	"net/http"
@@ -35,6 +36,10 @@ type config struct {
 	JanitorInterval time.Duration `env:"JANITOR_INTERVAL" envDefault:"1m"`
 	ShutdownTimeout time.Duration `env:"SHUTDOWN_TIMEOUT" envDefault:"10s"`
 	LogLevel        slog.Level    `env:"LOG_LEVEL"        envDefault:"INFO"`
+	// SnapshotPath is the file the cache is saved to periodically and on
+	// shutdown, and restored from on startup. Empty disables snapshots.
+	SnapshotPath     string        `env:"SNAPSHOT_PATH"`
+	SnapshotInterval time.Duration `env:"SNAPSHOT_INTERVAL" envDefault:"1m"`
 }
 
 func (c config) validate() error {
@@ -51,6 +56,8 @@ func (c config) validate() error {
 		return fmt.Errorf("%w: JANITOR_INTERVAL must be positive", errInvalidConfig)
 	case c.ShutdownTimeout <= 0:
 		return fmt.Errorf("%w: SHUTDOWN_TIMEOUT must be positive", errInvalidConfig)
+	case c.SnapshotInterval <= 0:
+		return fmt.Errorf("%w: SNAPSHOT_INTERVAL must be positive", errInvalidConfig)
 	}
 	return nil
 }
@@ -106,6 +113,13 @@ func run(ctx context.Context, _ []string, getenv func(string) string, _, stderr 
 	if err != nil {
 		return fmt.Errorf("create proxy: %w", err)
 	}
+	if cfg.SnapshotPath != "" {
+		n, err := readSnapshot(p, cfg.SnapshotPath)
+		if err != nil {
+			return fmt.Errorf("restore cache: %w", err)
+		}
+		logger.InfoContext(ctx, "cache restored", "entries", n, "path", cfg.SnapshotPath)
+	}
 
 	var lc net.ListenConfig
 	ln, err := lc.Listen(ctx, "tcp", cfg.Addr)
@@ -145,11 +159,64 @@ func run(ctx context.Context, _ []string, getenv func(string) string, _, stderr 
 			return nil
 		})
 	}
+	if cfg.SnapshotPath != "" {
+		g.Go(func() error {
+			snapshotLoop(gctx, logger, p, cfg.SnapshotPath, cfg.SnapshotInterval)
+			return nil
+		})
+	}
 	if err := g.Wait(); err != nil {
 		return err
 	}
+	if cfg.SnapshotPath != "" {
+		if err := writeSnapshot(p, cfg.SnapshotPath); err != nil {
+			return fmt.Errorf("save cache: %w", err)
+		}
+	}
 	logger.InfoContext(ctx, "stopped")
 	return nil
+}
+
+func snapshotLoop(ctx context.Context, logger *slog.Logger, p *proxy.Proxy, path string, every time.Duration) {
+	ticker := time.NewTicker(every)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := writeSnapshot(p, path); err != nil {
+				logger.ErrorContext(ctx, "save cache snapshot", "error", err)
+			}
+		}
+	}
+}
+
+func writeSnapshot(p *proxy.Proxy, path string) error {
+	f, err := os.Create(path) //nolint:gosec // G304: the path comes from the operator's config.
+	if err != nil {
+		return fmt.Errorf("create snapshot: %w", err)
+	}
+	if err := p.SaveSnapshot(f); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("close snapshot: %w", err)
+	}
+	return nil
+}
+
+func readSnapshot(p *proxy.Proxy, path string) (int, error) {
+	f, err := os.Open(path) //nolint:gosec // G304: the path comes from the operator's config.
+	if errors.Is(err, fs.ErrNotExist) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("open snapshot: %w", err)
+	}
+	defer func() { _ = f.Close() }()
+	return p.LoadSnapshot(f)
 }
 
 type expirer interface {

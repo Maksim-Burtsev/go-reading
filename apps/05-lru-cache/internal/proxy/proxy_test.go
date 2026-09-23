@@ -413,3 +413,49 @@ func TestPurgeDoesNotAffectFetchInFlight(t *testing.T) {
 		require.True(t, ok)
 	})
 }
+
+func TestSnapshotRoundTrip(t *testing.T) {
+	t.Parallel()
+	var calls atomic.Int32
+	upstream := newUpstream(t, &calls)
+	u, err := url.Parse(upstream.URL)
+	require.NoError(t, err)
+	newCachedProxy := func() (*proxy.Proxy, *proxy.Cache) {
+		cache, err := lru.New[string, *proxy.Response](16)
+		require.NoError(t, err)
+		p, err := proxy.New(u, upstream.Client(), cache, 1024, slog.New(slog.DiscardHandler))
+		require.NoError(t, err)
+		return p, cache
+	}
+
+	src, _ := newCachedProxy()
+	serve(t, src.Handler(), http.MethodGet, "/ok")
+	serve(t, src.Handler(), http.MethodGet, "/ok?v=2")
+	var snapshot bytes.Buffer
+	require.NoError(t, src.SaveSnapshot(&snapshot))
+
+	dst, cache := newCachedProxy()
+	n, err := dst.LoadSnapshot(&snapshot)
+	require.NoError(t, err)
+	require.Equal(t, 2, n)
+	require.Equal(t, 2, cache.Len())
+	for _, key := range []string{"/ok", "/ok?v=2"} {
+		_, ok := cache.Peek(key)
+		require.True(t, ok, key)
+	}
+	require.Equal(t, int32(2), calls.Load())
+}
+
+func TestLoadSnapshotRejectsCorruptInput(t *testing.T) {
+	t.Parallel()
+	u, err := url.Parse("http://upstream.test")
+	require.NoError(t, err)
+	cache, err := lru.New[string, *proxy.Response](16)
+	require.NoError(t, err)
+	p, err := proxy.New(u, http.DefaultClient, cache, 1024, slog.New(slog.DiscardHandler))
+	require.NoError(t, err)
+
+	_, err = p.LoadSnapshot(strings.NewReader(`{"key":"/a","response":{}}` + "\n" + `{"key":`))
+	require.Error(t, err)
+	require.Zero(t, cache.Len())
+}

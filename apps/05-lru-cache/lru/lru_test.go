@@ -375,3 +375,22 @@ func TestConcurrentAccess(t *testing.T) {
 	require.Equal(t, gets.Load(), s.Hits+s.Misses)
 	require.Equal(t, callbacks.Load(), s.Evictions+s.Expirations+removed.Load())
 }
+
+func TestAllYieldsLiveEntries(t *testing.T) {
+	t.Parallel()
+	clock := newFakeClock()
+	c := newCache(t, 4, lru.WithTTL[string, int](time.Minute), lru.WithClock[string, int](clock.Now))
+	c.Set("a", 1)
+	clock.Advance(30 * time.Second)
+	c.Set("b", 2)
+	c.Set("c", 3)
+	c.Get("b")
+	clock.Advance(30 * time.Second)
+
+	var keys []string
+	for k := range c.All() {
+		keys = append(keys, k)
+	}
+	require.ElementsMatch(t, []string{"b", "c"}, keys)
+	require.Equal(t, lru.Stats{Hits: 1}, c.Stats())
+}

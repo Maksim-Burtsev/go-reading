@@ -70,6 +70,46 @@ func New(upstream *url.URL, client *http.Client, cache *Cache, maxBody int64, lo
 	}, nil
 }
 
+type snapshotEntry struct {
+	Key      string   `json:"key"`
+	Response Response `json:"response"`
+}
+
+// SaveSnapshot writes the cached responses to w as a stream of JSON objects,
+// from the least to the most recently used.
+func (p *Proxy) SaveSnapshot(w io.Writer) error {
+	enc := json.NewEncoder(w)
+	for key, resp := range p.cache.All() {
+		if err := enc.Encode(snapshotEntry{Key: key, Response: *resp}); err != nil {
+			return fmt.Errorf("encode %q: %w", key, err)
+		}
+	}
+	return nil
+}
+
+// LoadSnapshot stores the responses written by SaveSnapshot in the cache and
+// returns how many were restored. The whole snapshot is decoded before any
+// entry is stored, so a corrupt snapshot leaves the cache untouched.
+func (p *Proxy) LoadSnapshot(r io.Reader) (int, error) {
+	dec := json.NewDecoder(r)
+	var entries []snapshotEntry
+	for {
+		var e snapshotEntry
+		err := dec.Decode(&e)
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return 0, fmt.Errorf("decode snapshot entry %d: %w", len(entries), err)
+		}
+		entries = append(entries, e)
+	}
+	for _, e := range entries {
+		p.cache.Set(e.Key, &e.Response)
+	}
+	return len(entries), nil
+}
+
 // Handler returns the HTTP handler serving proxied requests and the cache
 // administration endpoints.
 func (p *Proxy) Handler() http.Handler {

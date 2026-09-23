@@ -5,6 +5,7 @@ package lru
 import (
 	"container/list"
 	"errors"
+	"iter"
 	"strconv"
 	"sync"
 	"time"
@@ -218,6 +219,26 @@ func (c *Cache[K, V]) DeleteExpired() int {
 	c.mu.Unlock()
 	c.notify(evicted)
 	return removed
+}
+
+// All returns an iterator over the live entries, from the least to the most
+// recently used. Expired entries are skipped. Iterating does not update
+// recency or the counters.
+func (c *Cache[K, V]) All() iter.Seq2[K, V] {
+	return func(yield func(K, V) bool) {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		now := c.now()
+		for key, el := range c.items {
+			e := el.Value.(*entry[K, V])
+			if c.ttl > 0 && e.expiredAt(now) {
+				continue
+			}
+			if !yield(key, e.value) {
+				return
+			}
+		}
+	}
 }
 
 // Len returns the number of entries, including expired entries that have not
