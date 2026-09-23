@@ -28,7 +28,7 @@ func main() {
 	}
 }
 
-func run(ctx context.Context, args []string, getenv func(string) string, stdout, stderr io.Writer) error {
+func run(ctx context.Context, args []string, getenv func(string) string, stdout, _ io.Writer) error {
 	if len(args) > 1 {
 		return fmt.Errorf("%w: got %q", errUsage, args[1:])
 	}
@@ -58,7 +58,7 @@ func run(ctx context.Context, args []string, getenv func(string) string, stdout,
 		ReadTimeout:       10 * time.Second,
 		WriteTimeout:      10 * time.Second,
 		IdleTimeout:       time.Minute,
-		ErrorLog:          slog.NewLogLogger(slog.NewJSONHandler(stderr, nil), slog.LevelError),
+		ErrorLog:          slog.NewLogLogger(logger.Handler(), slog.LevelError),
 	}
 
 	var lc net.ListenConfig

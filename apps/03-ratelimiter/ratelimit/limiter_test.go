@@ -1,7 +1,6 @@
 package ratelimit
 
 import (
-	"context"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -105,23 +104,6 @@ func TestAllowAfterClose(t *testing.T) {
 			_, err = l.Allow(t.Context(), "client")
 			require.ErrorIs(t, err, ErrClosed)
 			require.True(t, clock.ticker(t).stopped.Load())
-		})
-	}
-}
-
-func TestAllowCanceledContext(t *testing.T) {
-	t.Parallel()
-	for _, tt := range limiterCases(10) {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			l, err := tt.new(newFakeClock())
-			require.NoError(t, err)
-			t.Cleanup(l.Close)
-
-			ctx, cancel := context.WithCancel(t.Context())
-			cancel()
-			_, err = l.Allow(ctx, "client")
-			require.ErrorIs(t, err, context.Canceled)
 		})
 	}
 }

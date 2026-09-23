@@ -1,6 +1,7 @@
 package ratelimit
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -113,6 +114,24 @@ func TestMiddleware(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestMiddlewareIgnoresEndedRequests(t *testing.T) {
+	t.Parallel()
+	var logs bytes.Buffer
+	l := limiterFunc(func(ctx context.Context, _ string) (Decision, error) {
+		return Decision{}, ctx.Err()
+	})
+	h := Middleware(l, RemoteIP, slog.New(slog.NewJSONHandler(&logs, nil)))(http.HandlerFunc(writeOK))
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequestWithContext(ctx, http.MethodGet, "/", nil))
+
+	require.Empty(t, rec.Header())
+	require.Empty(t, rec.Body.String())
+	require.Empty(t, logs.String())
 }
 
 func TestMiddlewareWithTokenBucket(t *testing.T) {

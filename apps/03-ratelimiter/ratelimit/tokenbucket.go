@@ -45,11 +45,9 @@ func NewTokenBucket(rate Rate, burst int, opts ...Option) (*TokenBucket, error) 
 	return tb, nil
 }
 
-// Allow takes a token from the bucket of key if one is available.
-func (tb *TokenBucket) Allow(ctx context.Context, key string) (Decision, error) {
-	if err := ctx.Err(); err != nil {
-		return Decision{}, fmt.Errorf("token bucket: %w", err)
-	}
+// Allow takes a token from the bucket of key if one is available. It never blocks, so it ignores
+// the context.
+func (tb *TokenBucket) Allow(_ context.Context, key string) (Decision, error) {
 	return tb.store.do(key, tb.take)
 }
 

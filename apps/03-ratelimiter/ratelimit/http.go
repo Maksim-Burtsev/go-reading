@@ -28,7 +28,8 @@ type KeyFunc func(r *http.Request) (string, error)
 // Middleware returns an HTTP middleware that rate limits requests by the key from keyFunc and
 // sets the X-RateLimit-Limit, X-RateLimit-Remaining and X-RateLimit-Reset headers, in seconds.
 // Rejected requests get 429 with Retry-After and a JSON body; key and limiter failures get 400
-// and 503.
+// and 503. A limiter error on a request whose context has ended is not a limiter failure: nothing
+// is logged or written for it.
 func Middleware(l Limiter, keyFunc KeyFunc, logger *slog.Logger) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return &limitHandler{limiter: l, keyFunc: keyFunc, logger: logger, next: next}
@@ -59,6 +60,9 @@ func (h *limitHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	d, err := h.limiter.Allow(ctx, key)
 	if err != nil {
+		if ctx.Err() != nil {
+			return
+		}
 		h.logger.ErrorContext(ctx, "rate limit decision", slog.String("key", key), slog.Any("error", err))
 		h.writeError(ctx, w, http.StatusServiceUnavailable, errorResponse{Error: "rate limiter unavailable"})
 		return

@@ -97,9 +97,25 @@ func TestTokenBucketKeysAreIndependent(t *testing.T) {
 
 func TestTokenBucketEvictsOnlyFullBuckets(t *testing.T) {
 	t.Parallel()
-	tb, err := NewTokenBucket(Rate{Limit: 10, Period: time.Second}, 5, WithClock(newFakeClock()))
+	clock := newFakeClock()
+	tb, err := NewTokenBucket(Rate{Limit: 10, Period: time.Second}, 5, WithClock(clock))
 	require.NoError(t, err)
 	t.Cleanup(tb.Close)
+	ticker := clock.ticker(t)
 
-	require.Equal(t, 500*time.Millisecond, tb.store.ttl)
+	for range 5 {
+		_, err := tb.Allow(t.Context(), "client")
+		require.NoError(t, err)
+	}
+	clock.Advance(500*time.Millisecond - time.Nanosecond)
+	ticker.tickAndWait()
+	require.True(t, tb.store.has("client"))
+
+	clock.Advance(time.Nanosecond)
+	ticker.tickAndWait()
+	require.False(t, tb.store.has("client"))
+
+	d, err := tb.Allow(t.Context(), "client")
+	require.NoError(t, err)
+	require.Equal(t, Decision{Allowed: true, Limit: 5, Remaining: 4, ResetAfter: 100 * time.Millisecond}, d)
 }

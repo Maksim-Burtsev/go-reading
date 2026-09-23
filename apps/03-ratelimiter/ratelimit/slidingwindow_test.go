@@ -78,9 +78,23 @@ func TestSlidingWindow(t *testing.T) {
 
 func TestSlidingWindowEvictsAfterTwoPeriods(t *testing.T) {
 	t.Parallel()
-	sw, err := NewSlidingWindow(Rate{Limit: 4, Period: time.Second}, WithClock(newFakeClock()))
+	clock := newFakeClock()
+	sw, err := NewSlidingWindow(Rate{Limit: 4, Period: time.Second}, WithClock(clock))
 	require.NoError(t, err)
 	t.Cleanup(sw.Close)
+	ticker := clock.ticker(t)
 
-	require.Equal(t, 2*time.Second, sw.store.ttl)
+	_, err = sw.Allow(t.Context(), "client")
+	require.NoError(t, err)
+	clock.Advance(2*time.Second - time.Nanosecond)
+	ticker.tickAndWait()
+	require.True(t, sw.store.has("client"))
+
+	clock.Advance(time.Nanosecond)
+	ticker.tickAndWait()
+	require.False(t, sw.store.has("client"))
+
+	d, err := sw.Allow(t.Context(), "client")
+	require.NoError(t, err)
+	require.Equal(t, Decision{Allowed: true, Limit: 4, Remaining: 3, ResetAfter: 2 * time.Second}, d)
 }

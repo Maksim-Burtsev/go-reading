@@ -38,7 +38,8 @@ func (a *Algorithm) UnmarshalText(text []byte) error {
 type Config struct {
 	Addr      string    `env:"ADDR" envDefault:"localhost:8080"`
 	Algorithm Algorithm `env:"ALGORITHM" envDefault:"token_bucket"`
-	// Limit requests are allowed per Period by either algorithm.
+	// Limit requests per Period is the sustained rate. The sliding window never admits more in any
+	// trailing Period; the token bucket also lets an idle client spend up to Burst at once.
 	Limit  int           `env:"LIMIT" envDefault:"5"`
 	Period time.Duration `env:"PERIOD" envDefault:"1s"`
 	// Burst is the bucket capacity of the token bucket. The sliding window ignores it.

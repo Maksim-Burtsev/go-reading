@@ -2,7 +2,6 @@ package ratelimit
 
 import (
 	"context"
-	"fmt"
 	"time"
 )
 
@@ -40,11 +39,8 @@ func NewSlidingWindow(rate Rate, opts ...Option) (*SlidingWindow, error) {
 }
 
 // Allow counts a request for key if the estimated number of requests in the trailing period
-// stays within the limit.
-func (sw *SlidingWindow) Allow(ctx context.Context, key string) (Decision, error) {
-	if err := ctx.Err(); err != nil {
-		return Decision{}, fmt.Errorf("sliding window: %w", err)
-	}
+// stays within the limit. It never blocks, so it ignores the context.
+func (sw *SlidingWindow) Allow(_ context.Context, key string) (Decision, error) {
 	return sw.store.do(key, sw.hit)
 }
 
