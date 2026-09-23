@@ -1,111 +1,155 @@
-# 04-worker-pool
+# 04 · worker-pool
 
-A webhook dispatcher: `POST /deliveries` queues a JSON payload in a bounded in-memory queue, a pool of workers POSTs it to the target with retries, and `GET /deliveries/{id}` reports the outcome.
+An HTTP service that delivers webhooks for its clients. `POST /deliveries` takes a target URL and a
+JSON payload and answers 202 with a delivery ID; a pool of goroutines capped with
+`errgroup.SetLimit` POSTs the payload to the target, retrying network errors, 429 and 5xx with
+jittered exponential backoff, and `GET /deliveries/{id}` reports the outcome. Everything lives in
+memory: a full queue answers 503, and on SIGTERM the service stops taking work, drains the queue for
+a bounded time and cancels whatever is left.
 
-## Run
+## Run it
 
 ```sh
-go run ./apps/04-worker-pool/cmd/worker-pool
+WORKERS=1 QUEUE_SIZE=1 DRAIN_TIMEOUT=3s go run ./apps/04-worker-pool/cmd/worker-pool
 ```
 
-## Where to start
+In a second terminal:
 
-1. `cmd/worker-pool/main.go:run` — wires queue, pool, recorder and HTTP server, then runs the shutdown sequence: stop HTTP, close the queue, drain, cancel.
-2. `internal/api/api.go:create` — how a delivery gets in: body limit, validation, `Track`, `Push`, and the 503 when the queue is full.
-3. `internal/dispatch/pool.go:Run` — the dispatcher loop: `errgroup` with `SetLimit` pulls tasks off the queue channel and emits one `Result` per task.
-4. `internal/dispatch/pool.go:deliver` — the retry loop: one attempt, classify the error, back off with `backoff.Delay` and `backoff.Sleep`.
-5. `internal/status/recorder.go:Run` — the single consumer of results, which also evicts old records.
+```sh
+curl -i localhost:8080/deliveries -d '{"url":"http://127.0.0.1:1/hook","payload":{"event":"order.paid"}}'
+for i in 1 2 3; do curl -s -o /dev/null -w '%{http_code}\n' localhost:8080/deliveries -d '{"url":"http://127.0.0.1:1/hook","payload":{}}'; done
+curl -s localhost:8080/deliveries/ID
+```
 
-## Data flow
-
-1. `POST /deliveries` reaches `handler.create`, which decodes the body through `http.MaxBytesReader`, validates the URL and payload, and assigns an ID with `crypto/rand.Text`.
-2. The recorder `Track`s the delivery as `queued`, then `Queue.Push` does a non-blocking send into a buffered channel; if it is full, the record is dropped and the client gets 503 with `Retry-After`.
-3. `Pool.Run` ranges over `Queue.Tasks()`; `g.Go` blocks while `Workers` deliveries are in flight, so pending tasks wait in the channel buffer.
-4. `deliver` calls `attempt`, which POSTs with a per-attempt timeout: 2xx is delivered, other non-retryable statuses are wrapped in `ErrPermanent`, and network errors, 429 and 5xx are retried after a jittered backoff, up to `MaxAttempts`.
-5. Every task produces exactly one `Result` on `Pool.Results()`; `Recorder.Run` applies it to the record that `GET /deliveries/{id}` returns.
-6. On SIGTERM, `serve` shuts the HTTP server down, `run` closes the queue and waits for the pool; when `DRAIN_TIMEOUT` expires, `abort` cancels `workCtx`, in-flight requests stop and the remaining tasks fail as `canceled` without being sent.
-7. `Run` closes the results channel after `g.Wait()`, the recorder loop ends, and `run` returns.
-
-## Go specifics here
-
-1. `internal/dispatch/pool.go:63` — a closure started inside a `for range` loop
-
-   <details><summary>Explanation</summary>
-
-   Since Go 1.22 each iteration of `for task := range tasks` gets a fresh `task` variable, so every goroutine captures its own task. In Python a closure created in a loop would see only the last value of the loop variable. `g.Go` also blocks here once `SetLimit` goroutines are running, so this loop is where backpressure happens: it does not receive the next task until the current one has a worker slot.
-
-   </details>
-
-2. `internal/dispatch/queue.go:20` — a read lock around a channel send
-
-   <details><summary>Explanation</summary>
-
-   Sending on a closed channel panics, so `Push` and `Close` must not overlap. `Push` never blocks (the `select` has a `default`), so many producers can safely hold the shared read lock at once. `Close` takes the exclusive write lock, which guarantees that no send is in progress when `close(q.tasks)` runs.
-
-   </details>
-
-3. `cmd/worker-pool/main.go:119` — `context.WithoutCancel`
-
-   <details><summary>Explanation</summary>
-
-   `ctx` is cancelled by SIGTERM. Deliveries must keep running while the queue drains, so `workCtx` keeps `ctx`'s values but not its cancellation, and gets its own `abort` function. `context.AfterFunc(drainCtx, abort)` on line 147 calls `abort` when the drain timeout expires. Python has no built-in equivalent; cancellation in Go is an explicit value passed down the call chain, not an exception raised into a task.
-
-   </details>
-
-4. `internal/status/recorder.go:107` — writing the record back into the map
-
-   <details><summary>Explanation</summary>
-
-   `map[string]Record` stores struct values, not references. `rec, ok := r.records[id]` returns a copy, and `r.records[id].Status = x` does not compile because map elements are not addressable. The code reads, modifies the copy and stores it again, all under the same lock.
-
-   </details>
-
-5. `internal/dispatch/pool.go:134` — two `%w` verbs in one `fmt.Errorf`
-
-   <details><summary>Explanation</summary>
-
-   Since Go 1.20 an error can wrap several errors. The result matches `errors.Is(err, ErrPermanent)`, which `deliver` uses to stop retrying, and `errors.As(err, &statusErr)`, which gives the HTTP status code. Where Python would use a hierarchy of exception classes, Go classifies errors through sentinel values and typed errors in the wrap chain.
-
-   </details>
+`ID` is the one from the `Location` header. Nothing listens on port 1, so every attempt is refused
+and retried: three POSTs get 202 and the fourth 503. Press Ctrl-C in the first terminal while
+retries are running to watch the drain time out.
 
 ## Questions
 
-1. All workers are busy and the queue still has room. What does a `POST /deliveries` return, and where does the task wait? What changes once the queue is full?
+Answer from the code first, then open the answer.
+
+1. SIGTERM arrives while deliveries are still retrying. What would change if `run` passed `ctx` to
+   `pool.Run` instead of `workCtx`?
 
    <details><summary>Answer</summary>
 
-   It returns 202 and the task waits in the buffered channel inside `Queue`. At most one more task sits outside the buffer: the one the dispatcher loop took before it blocked in `g.Go`. Once the buffer is full, `Push` returns `ErrQueueFull`, the handler calls `Forget` and responds 503 with `Retry-After: 1`.
+   `ctx` comes from `signal.NotifyContext`, so the signal cancels it at once. `workCtx` is built
+   with `context.WithoutCancel(ctx)`: it keeps the values of `ctx` but not its cancellation, and has
+   its own `abort`, which `context.AfterFunc(drainCtx, abort)` calls only when `DRAIN_TIMEOUT` runs
+   out. With `ctx` passed directly, the signal would abort in-flight requests and backoff sleeps
+   immediately, every task still in the queue would be reported `canceled` with zero attempts, and
+   `DRAIN_TIMEOUT` would have no effect. Rule: give background work a context detached from the
+   shutdown signal but bounded by its own deadline, so that "stop accepting" and "stop working" are
+   separate steps.
 
    </details>
 
-2. Why does `Pool.Run` use a plain `errgroup.Group` and not `errgroup.WithContext`?
+2. `run` calls `queue.Close()` while HTTP handlers may still be calling `Push`. What does closing
+   the channel tell `Pool.Run`, and why do `Push` and `Close` share an `RWMutex`?
 
    <details><summary>Answer</summary>
 
-   With `WithContext`, the first goroutine that returns an error cancels the shared context, which would abort every other delivery. One failing target must not affect the others. Here the group is used for its concurrency limit and `Wait`; the returned error only reports that cancellation cut the drain short.
+   Closing a channel means "no more values": receivers still get everything already buffered, and
+   only then does `for task := range tasks` end, so queued deliveries still go out during the drain.
+   Sending on a closed channel panics, so a `close` must never overlap a send. `Push` holds the read
+   lock around its `closed` check and its send; many pushes can hold it at once because none of them
+   blocks (the `select` has a `default`). `Close` takes the write lock, which waits for in-flight
+   pushes and makes every later one see `closed` and return `ErrQueueClosed`. Rule: close a channel
+   from the sending side and only once no send can still happen; with many independent senders,
+   guard the sends and the close with a lock and a flag.
 
    </details>
 
-3. What would change on SIGTERM if `run` passed `ctx` to `pool.Run` instead of `workCtx`?
+3. All workers are busy and another `POST /deliveries` arrives. Where does the new task wait, and
+   when do clients start getting 503 instead of 202?
 
    <details><summary>Answer</summary>
 
-   The signal would cancel all deliveries immediately: in-flight requests would be aborted and every queued task would fail as `canceled` without an attempt. `DRAIN_TIMEOUT` would have no effect.
+   `Push` sends inside a `select` with a `default` case, so the handler never blocks: the send
+   either succeeds at once or falls through. `Pool.Run` is parked in `g.Go`, because
+   `g.SetLimit(p.cfg.Workers)` makes `Go` block until a running goroutine returns; while parked it
+   stops receiving, so new tasks pile up in the channel buffer, plus the one task the loop took
+   before it blocked. With `WORKERS=1` and `QUEUE_SIZE=1` that is three accepted deliveries; the
+   fourth `Push` takes the `default` branch, and the handler forgets the record and answers 503 with
+   `Retry-After: 1`. Rule: a bounded buffer plus a non-blocking send turns overload into an
+   immediate, explicit rejection instead of blocked handlers or growing memory.
 
    </details>
 
-4. A target always answers 503. With the defaults (`MAX_ATTEMPTS=5`, `BACKOFF_BASE=500ms`, `BACKOFF_MAX=30s`), what is the upper bound on total backoff sleep, and what does `GET /deliveries/{id}` show at the end?
+4. Why does `create` call `Track` before `Push`, and not after it?
 
    <details><summary>Answer</summary>
 
-   Five attempts mean four sleeps, with ceilings of 500ms, 1s, 2s and 4s, so less than 7.5s in total (plus up to 10s `ATTEMPT_TIMEOUT` per attempt). The record has `status: failed`, `attempts: 5` and `error: "retries exhausted after 5 attempts: target responded 503 Service Unavailable"`.
+   Once `Push` returns, the task belongs to another goroutine: a worker can deliver it and
+   `Recorder.Run` can apply its `Result` before the handler reaches its next line. `apply` ignores
+   IDs it does not know, so with `Track` after `Push` a fast result could be dropped, and the late
+   `Track` would then store the delivery as `queued` for good; queued records are never evicted.
+   Tracking first, and calling `Forget` when `Push` fails, closes that window. Rule: create the
+   state that will receive a result before handing the work to another goroutine.
 
    </details>
 
-5. Why does `create` call `Track` before `Push` and not after it?
+5. `Pool.Run` uses a plain `errgroup.Group`. What would `errgroup.WithContext` change here, and
+   when would it start to hurt?
 
    <details><summary>Answer</summary>
 
-   Once the task is pushed, a worker can finish it and the recorder can apply its `Result` before `Track` runs. `apply` ignores unknown IDs, and a later `Track` would then store the delivery as `queued` for good; queued records are never evicted. Tracking first and calling `Forget` when `Push` fails avoids that race.
+   `WithContext` returns a group and a derived context that is canceled when the first function
+   passed to `Go` returns a non-nil error or when `Wait` returns. Here the goroutine returns an
+   error only for `StatusCanceled`, which happens only after `ctx` is already canceled, so today
+   nothing would change. It would hurt the day someone also returns `res.Err` for failed deliveries:
+   the first target answering 400 would cancel the group context and abort every other in-flight
+   delivery. The plain group says the deliveries are independent and uses errgroup only for its
+   limit and `Wait`. Rule: use `WithContext` when one failure should stop the siblings; for
+   independent jobs use a plain `Group` and handle each result where it is produced.
+
+   </details>
+
+6. One target answers 400 and another 503. How does `deliver` decide to stop or to retry, and what
+   would break if `attempt` built its errors with `%v` instead of `%w`?
+
+   <details><summary>Answer</summary>
+
+   For a 400, `attempt` returns `fmt.Errorf("%w: %w", ErrPermanent, &StatusError{Code: code})`. An
+   error made with several `%w` verbs unwraps to a list (Go 1.20), and `errors.Is` and `errors.As`
+   search the whole tree, so this one matches both `ErrPermanent` and `*StatusError`. `deliver`
+   stops after one attempt when `errors.Is(err, ErrPermanent)`; a 503 comes back as a bare
+   `*StatusError` and is retried. With `%v` only the text would survive: `errors.Is` would be false,
+   the 400 would be retried `MAX_ATTEMPTS` times, and the record would end as "retries exhausted".
+   Rule: classify errors by wrapping sentinels and typed errors with `%w` and testing them with
+   `errors.Is` and `errors.As`, never by matching message text.
+
+   </details>
+
+7. Why does `backoff.Sleep` use a timer and a `select` instead of `time.Sleep`, and why is the
+   delay drawn at random from [0, ceiling) rather than being exactly `Base*2^retry`?
+
+   <details><summary>Answer</summary>
+
+   `time.Sleep` cannot be interrupted, so a delivery waiting out a 30-second backoff would hold up
+   the drain for the whole wait; a `select` on `ctx.Done()` and the timer's channel returns as soon
+   as either is ready. The randomness is "full jitter": deliveries that failed together against one
+   target would otherwise retry at the same instants and hit it in synchronized waves, and spreading
+   each wait uniformly below a ceiling that doubles per retry (up to `Max`) breaks the waves while
+   keeping the exponential growth. With the defaults, a delivery that always gets 503 waits less
+   than 7.5 s in total across its four sleeps. Rule: every wait in a service should be cancellable,
+   and retries against a shared dependency need jitter, not only exponential growth.
+
+   </details>
+
+8. `apply` reads a `Record` from the map, changes it and stores it back. Why can't it assign
+   `r.records[res.TaskID].Status` directly, and what would change if the map held `*Record` instead?
+
+   <details><summary>Answer</summary>
+
+   A `map[string]Record` stores struct values, and map elements are not addressable, so assigning to
+   a field of `r.records[res.TaskID]` does not compile; `rec, ok := r.records[res.TaskID]` yields a
+   copy, which `apply` edits and writes back under the same lock. The copy is also what makes `Get`
+   safe: it returns a snapshot, and the handler encodes it to JSON after the lock is released. With
+   `map[string]*Record`, `apply` could edit in place, but `Get` would hand the handler a pointer to
+   the struct that `apply` later writes to, a data race unless every reader also holds the lock.
+   Rule: struct values in maps, slices and channels give copy-on-read snapshots; pointers mean
+   shared state that every reader must synchronize.
 
    </details>

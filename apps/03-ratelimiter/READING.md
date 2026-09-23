@@ -1,134 +1,153 @@
-# 03-ratelimiter
+# 03 · ratelimiter
 
-An importable per-key rate limiting library (token bucket and sliding window counter, in-memory
-with TTL eviction, HTTP middleware) and a demo API server that uses it.
+A small JSON API that serves Go proverbs and rate limits each client by IP address. The limiting
+comes from the importable `ratelimit` package: a token bucket or a sliding window counter per
+client, kept in memory and evicted when idle, with the decision reported in `X-RateLimit-*`
+headers and a 429 with `Retry-After` once a client is over its limit.
 
-## Run
+## Run it
 
 ```sh
-ALGORITHM=token_bucket LIMIT=5 PERIOD=1s BURST=10 go run ./apps/03-ratelimiter/cmd/ratelimiter  # then: curl -i localhost:8080/api/proverbs/1
+BURST=3 LIMIT=1 PERIOD=5s go run ./apps/03-ratelimiter/cmd/ratelimiter
+
+# in another terminal
+for i in 1 2 3 4; do curl -s -o /dev/null -w '%{http_code} ' localhost:8080/api/proverbs/1; done; echo
+curl -i localhost:8080/api/proverbs/1
 ```
 
-## Where to start
-
-1. `cmd/ratelimiter/main.go:run` — wiring and lifecycle: config, limiter choice, server, graceful shutdown.
-2. `ratelimit/http.go:ServeHTTP` — how a limiter decision becomes headers, a 429, or a pass-through.
-3. `ratelimit/store.go:do` — the shared per-key state, its locking, and the eviction loop below it.
-4. `ratelimit/tokenbucket.go:take` — the token bucket: refill with integer time arithmetic, then take.
-5. `ratelimit/slidingwindow.go:hit` — the sliding window counter: roll windows, estimate, count.
-
-## Data flow
-
-1. `run` loads `config.Config` from the environment and `newLimiter` builds a `TokenBucket` or a `SlidingWindow`.
-2. `server.New` routes `/healthz` directly and wraps everything under `/api/` in `ratelimit.Middleware`.
-3. The middleware derives the key with a `KeyFunc`: `RemoteIP`, or `ForwardedFor` when `TRUSTED_PROXIES` is set.
-4. `Limiter.Allow` calls `store.do`, which locks the store, loads or creates the key's state, stamps `lastSeen` and runs the algorithm callback (`take` or `hit`) to get a `Decision`.
-5. The middleware writes the `X-RateLimit-*` headers; a rejected request gets 429 with `Retry-After` and a JSON body, an allowed one reaches the proverbs handler.
-6. In the background `store.evictLoop` wakes on every tick and deletes keys idle for at least the TTL.
-7. On SIGTERM the context is canceled, `srv.Shutdown` drains in-flight requests, and the deferred `limiter.Close` stops the eviction goroutine.
-
-## Go specifics here
-
-1. `ratelimit/tokenbucket.go:9` — assignment to the blank identifier at package level.
-   <details><summary>Explanation</summary>
-
-   `var _ Limiter = (*TokenBucket)(nil)` is a compile-time check. Go interfaces are satisfied
-   implicitly: nothing in `TokenBucket` says "implements Limiter". Converting a typed nil pointer
-   to the interface forces the compiler to verify the method set, and `_` discards the value, so
-   the line costs nothing at run time. If `Allow` ever changes signature, the build breaks here
-   instead of at some distant call site.
-   </details>
-
-2. `ratelimit/http.go:123` — ranging over a function call.
-   <details><summary>Explanation</summary>
-
-   `slices.Backward(hops)` returns an iterator, `iter.Seq2[int, string]`: a function that takes a
-   `yield` callback. Since Go 1.23 `for ... range` accepts such functions, much like a Python
-   generator, and the loop body becomes the callback. Here it walks `X-Forwarded-For` from the last
-   hop to the first without copying or reversing the slice, and `return` inside the loop stops the
-   iteration.
-   </details>
-
-3. `ratelimit/store.go:96` — closing a channel that nothing is ever sent on.
-   <details><summary>Explanation</summary>
-
-   `stop` carries no values; closing it is a broadcast. A receive from a closed channel succeeds
-   immediately, so the `case <-s.stop` branch in `evictLoop` fires and the goroutine returns. Its
-   `defer close(s.done)` then unblocks `<-s.done` in `close`, which is how `Close` waits for the
-   goroutine to exit before it clears the map. `sync.Once` makes a second `Close` a no-op instead of
-   a panic from closing an already closed channel.
-   </details>
-
-4. `ratelimit/http.go:68` — the header name on the wire is not the one in the source.
-   <details><summary>Explanation</summary>
-
-   `http.Header.Set` canonicalizes keys with `textproto.CanonicalMIMEHeaderKey`, so
-   `X-RateLimit-Limit` is stored and sent as `X-Ratelimit-Limit`. HTTP header names are
-   case-insensitive, so clients do not care, but `curl -i` shows the canonical form and a test that
-   indexes the `http.Header` map directly with the original spelling finds nothing. `Header.Get`
-   canonicalizes too, which is why the tests use it.
-   </details>
-
-5. `cmd/ratelimiter/main.go:81` — deriving the shutdown context from a context that is already canceled.
-   <details><summary>Explanation</summary>
-
-   By the time shutdown starts, `ctx` is canceled: that is what triggered it. A timeout derived
-   from it would be expired at once and `Shutdown` would not wait for anything.
-   `context.WithoutCancel` keeps the parent's values but drops its cancellation, and
-   `WithTimeout` then gives the drain its own deadline. Using `context.Background()` would also
-   work, but it cuts the chain of values and the `contextcheck` linter flags it.
-   </details>
+Three requests spend the burst and the fourth gets 429; `curl -i` shows the rate limit headers and
+`Retry-After`. `ALGORITHM=sliding_window` switches the algorithm, and `/healthz` is never limited.
 
 ## Questions
 
-1. Why does `store.do` read `s.clock.Now()` after taking the mutex rather than before it?
+Answer from the code first, then open the answer.
+
+1. You press Ctrl-C, the server starts draining, and you press Ctrl-C again. What happens, and what
+   would change if `run` called `stop()` as soon as `ctx` was done?
+
    <details><summary>Answer</summary>
 
-   So that the timestamps applied to one key never go backwards. If two goroutines read the clock
-   first and then raced for the lock, the later timestamp could be applied first, and the next call
-   would carry a time before the state's own. For the sliding window that time can fall into the
-   previous window: `advance` sees a gap that is neither zero nor one period, zeroes both counters,
-   and hands the key a fresh limit. The token bucket would place `refilledAt` in the future of `now`
-   and report inflated reset and retry times. Reading the clock inside the critical section orders
-   the timestamps the same way as the state updates.
+   `signal.NotifyContext` registers the signals with `signal.Notify` and keeps them registered until
+   `stop` is called. The first SIGINT cancels `ctx`; later ones go to the context's internal
+   channel, which nobody reads any more, so they are ignored and the process keeps draining until
+   `srv.Shutdown` returns or `SHUTDOWN_TIMEOUT` runs out. Calling `stop()` right after
+   `<-ctx.Done()` unregisters the signals and restores the default action, so a second Ctrl-C kills
+   the process at once. `context.Cause(ctx)` reports which signal it was. Rule: the `stop` from
+   `signal.NotifyContext` decides whether a repeated signal is ignored or fatal; call it as soon as
+   shutdown starts if a second Ctrl-C should force the exit.
+
    </details>
 
-2. Neither limiter lets the caller configure the eviction TTL: it is `burst * interval` for the token bucket and `2 * period` for the sliding window. Why those values, and what would a shorter TTL break?
+2. SIGTERM arrives while a request is being served. Why does `run` build the shutdown deadline on
+   `context.WithoutCancel(ctx)`, and what would `context.WithTimeout(ctx, cfg.ShutdownTimeout)` do?
+
    <details><summary>Answer</summary>
 
-   After that much idle time the state is indistinguishable from a fresh one: the bucket has
-   refilled to `burst`, and both window counters have rolled out. Evicting it changes nothing a
-   client can observe. With a shorter TTL a partially drained bucket, or a window still holding
-   requests, would be deleted and recreated full, and a client that pauses just long enough would
-   get more than its limit.
+   When the `select` returns, `ctx` is already canceled: that is what woke it. A context derived
+   from a canceled parent is born canceled, so `srv.Shutdown` would close the listener, see the
+   request still active, and return `context.Canceled` at once; `run` would return an error and
+   `main` would exit with status 1 in the middle of the request. `WithoutCancel` keeps the parent's
+   values but drops its cancellation and deadline, so the new timeout alone bounds the drain and
+   `Shutdown` waits for requests in flight. `context.Background()` would also work, but it loses the
+   values and the `contextcheck` linter rejects it. Rule: cleanup that starts because a context was
+   canceled needs a context detached from it, with its own deadline.
+
    </details>
 
-3. `newLimiter` returns `ratelimit.NewTokenBucket(...)` directly, although that function returns `(*TokenBucket, error)` and `newLimiter` returns `(limiter, error)`. When construction fails, is the returned `limiter` equal to `nil`? Why is the code still correct?
+3. When `NewTokenBucket` fails, `newLimiter` returns its result unchanged. Is the `limiter` that
+   `run` receives equal to `nil`? Why is `run` still correct, and why does `require.Nil(t, l)` in
+   `TestInvalidConfig` pass either way?
+
    <details><summary>Answer</summary>
 
-   It is not `nil`. The `*TokenBucket` nil pointer is converted to the `limiter` interface, and an
-   interface holding a typed nil pointer compares unequal to `nil`, because it carries a type. The
-   code is still correct because `run` checks `err` first and never touches the limiter on error:
-   by Go convention the other results of a function are meaningless when `err != nil`. A caller
-   that checked `limiter != nil` instead would be wrong.
+   No. `return ratelimit.NewTokenBucket(...)` converts the `*TokenBucket` result into the `limiter`
+   interface, and an interface value is a (type, value) pair: here (`*TokenBucket`, nil), which is
+   not `nil` because the type half is set. `run` is still correct because it checks `err` first and
+   never touches the limiter on error. testify's `Nil` inspects the dynamic value with reflection
+   and accepts a typed nil pointer, while `l == nil` is false. The same conversion is used on
+   purpose in `var _ Limiter = (*TokenBucket)(nil)`, a compile-time check that costs nothing at run
+   time. Rule: branch on `err`, never on an interface result being `nil`, and return a literal `nil`
+   when the interface itself must be nil.
+
    </details>
 
-4. `ForwardedFor` reads `X-Forwarded-For` only when the direct peer is a trusted proxy, and reads it from right to left. What goes wrong if either rule is dropped?
+4. `/healthz` is never throttled, yet `DELETE /api/proverbs/4` spends a token before it gets 405.
+   Why?
+
    <details><summary>Answer</summary>
 
-   Clients control the header's initial content; each proxy only appends the address it received
-   the request from. Trusting the header from any peer lets a client send a fresh made-up address on
-   every request and never hit its limit. Reading from the left has the same flaw behind a real
-   proxy: the leftmost entries are whatever the client put there. Walking from the right and skipping
-   known proxies stops at the first address that a trusted proxy itself observed.
+   `server.New` builds two muxes. The outer one routes `GET /healthz` straight to its handler and
+   hands everything under `/api/` to `limit(limited)`, the rate limit middleware wrapping the inner
+   mux. A middleware is an `http.Handler` that runs before the handler it wraps, so it sees every
+   request the outer mux sends into that subtree, including those the inner mux then rejects with
+   404 or 405. Probes never eat into a client's budget, while malformed API calls do, which is what
+   you want against a client hammering bad URLs. Rule: where a middleware sits in the mux tree
+   decides which requests it sees; routing and method checks inside the wrapped handler run after
+   it.
+
    </details>
 
-5. In the tests, `fakeTicker.tickAndWait` sends on the ticker channel twice. What does the second send buy, given that the channel is unbuffered?
+5. `curl -i` prints `X-Ratelimit-Limit`, not `X-RateLimit-Limit` as the middleware writes it. Why,
+   and which lookup in a test would find nothing?
+
    <details><summary>Answer</summary>
 
-   A send on an unbuffered channel completes only when a receiver takes the value. The first send
-   returns as soon as `evictLoop` receives the tick, while the eviction pass may still be running.
-   The loop can receive the second tick only after `evictIdle` has returned and it is back in
-   `select`, so when the second send returns the first pass is complete. The tests assert on the
-   map without sleeping or polling.
+   `http.Header` is a `map[string][]string`, and its `Set`, `Add`, `Get` and `Values` methods pass
+   the name through `textproto.CanonicalMIMEHeaderKey`, which upper-cases the first letter and every
+   letter after a hyphen and lower-cases the rest. The map therefore holds `X-Ratelimit-Limit`:
+   `rec.Header().Get("X-RateLimit-Limit")` finds it, while indexing the map directly with
+   `rec.Header()["X-RateLimit-Limit"]` returns nil. Header names are case-insensitive on the wire,
+   and HTTP/2 sends them in lower case anyway, so clients do not care. Rule: go through the
+   `http.Header` methods, and index the map only with canonical names.
+
+   </details>
+
+6. Behind a load balancer at 10.0.0.1, with `TRUSTED_PROXIES=10.0.0.0/8`, a client sends its own
+   `X-Forwarded-For: 1.2.3.4` on every request. Which key does `ForwardedFor` choose, and what would
+   go wrong if it read the header from the left, or trusted it from any peer?
+
+   <details><summary>Answer</summary>
+
+   Each proxy appends the address it received the request from, so the app sees
+   `1.2.3.4, <client address>`. `ForwardedFor` walks the hops from the right with `slices.Backward`,
+   a range-over-func iterator whose loop body runs as a callback (a `return` inside it just stops
+   the iteration), skips trusted proxies, and keys on the first untrusted address: the one the load
+   balancer saw. Reading from the left would pick `1.2.3.4`, which the client chooses and can change
+   on every request to get a fresh bucket. Trusting the header from an untrusted peer opens the same
+   hole without any proxy involved. Rule: only the entries your own proxies appended are facts; key
+   on the rightmost address that is not one of your proxies.
+
+   </details>
+
+7. Two requests for the same key arrive microseconds apart, on either side of a window boundary.
+   Why does `store.do` call `s.clock.Now()` only after taking the mutex? What would the sliding
+   window do if the earlier timestamp were applied second?
+
+   <details><summary>Answer</summary>
+
+   Reading the clock inside the critical section makes the order of timestamps match the order in
+   which they are applied to the state. If each goroutine read the clock first and then raced for
+   the lock, the one holding the earlier time could apply it second. `advance` would then compute
+   `start.Sub(w.start) == -period`, fall into the `default` case and zero both counters: with a
+   limit of 2, a client that had just been rejected would get two more requests through in the same
+   trailing second. The token bucket would only report `Retry-After` and reset times inflated by the
+   gap. Rule: when a state transition depends on "now", read the clock under the lock that orders
+   the transitions.
+
+   </details>
+
+8. `main` defers `limiter.Close()`. In `store.close`, what does `close(s.stop)` do to `evictLoop`,
+   why does `close` then wait on `s.done`, and what does a second, concurrent `Close` see?
+
+   <details><summary>Answer</summary>
+
+   A receive from a closed channel succeeds immediately, so closing `stop` is a broadcast that
+   carries no value and wakes every receiver; `evictLoop`'s `case <-s.stop` fires and the goroutine
+   returns. Its deferred calls run last in, first out: `t.Stop()`, then `close(s.done)`, so
+   `<-s.done` in `close` returns only once the loop can no longer touch the map, and only then is
+   the map cleared. `sync.Once` guards `close(s.stop)`, because closing a closed channel panics; a
+   second caller blocks inside `Once.Do` until the first one finishes, then returns. In Python
+   terms: a `threading.Event` to stop and `Thread.join()` to wait. Rule: a stoppable goroutine needs
+   a stop signal and a done signal, and `Close` should be safe to call twice.
+
    </details>

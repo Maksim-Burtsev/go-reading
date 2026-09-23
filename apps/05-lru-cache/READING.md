@@ -1,93 +1,154 @@
-# 05-lru-cache
+# 05 · lru-cache
 
-A generic, thread-safe LRU cache with TTL, used by a read-through HTTP proxy that collapses concurrent misses with singleflight.
+A read-through HTTP caching proxy in front of one upstream, proxy.golang.org by default. `GET`
+requests are answered from a generic in-memory LRU cache with a TTL; misses go upstream, with
+concurrent misses for the same URL collapsed into one request by singleflight, and only 200
+responses are kept. `GET /_cache/stats` reports the counters and `PURGE /path` drops an entry.
 
-## Run
+## Run it
 
 ```sh
-go run ./apps/05-lru-cache/cmd/...
+LOG_LEVEL=debug CACHE_SIZE=2 go run ./apps/05-lru-cache/cmd/lru-cache
+
+# in another terminal
+for i in 1 2; do curl -si localhost:8080/golang.org/x/sync/@v/list | grep X-Cache; done
+curl -s localhost:8080/golang.org/x/text/@v/list > /dev/null
+curl -s localhost:8080/golang.org/x/net/@v/list > /dev/null
+curl -s localhost:8080/_cache/stats
+go test -run '^$' -bench . ./apps/05-lru-cache/lru
 ```
 
-Then run `curl -i localhost:8080/golang.org/x/sync/@v/list` twice: the first response has `X-Cache: MISS`, the second `X-Cache: HIT`. The upstream defaults to `https://proxy.golang.org`. `go test -bench . ./apps/05-lru-cache/lru` runs the benchmarks.
-
-## Where to start
-
-1. `cmd/lru-cache/main.go:run` builds the config, the cache options, the proxy and the HTTP server, and ties their lifetimes together with an errgroup.
-2. `lru/lru.go:Cache` holds a doubly linked list for recency, a map for lookup, and the counters, all behind one mutex.
-3. `lru/lru.go:Cache.Set` goes through `setLocked` and `evictLocked`: insertion, capacity eviction, and the eviction records that `notify` hands to `OnEvict`.
-4. `internal/proxy/proxy.go:Proxy.handleGet` is the request path: the cache key, the hit, and the fallback to `load` on a miss.
-5. `internal/proxy/proxy.go:Proxy.load` collapses concurrent misses for one key into a single upstream fetch that outlives the requests waiting on it.
-
-## Data flow
-
-1. `GET /some/path?q=1` reaches the mux built in `Proxy.Handler`; `requestKey` turns the escaped path and query into the cache key.
-2. `Cache.Get` finds the list element, checks its deadline, moves it to the front and counts a hit; the stored response is written with `X-Cache: HIT`.
-3. On a miss, `load` joins or starts a singleflight flight for the key and waits on either the result or the client's context.
-4. The flight re-checks the cache with `Peek`, then `fetch` calls the upstream with a context detached from the client, reads at most `MAX_BODY_BYTES`, and keeps three headers.
-5. A `200` response is stored with `Cache.Set`; if that pushes the cache over capacity, the back element is removed and `OnEvict` runs after the lock is released, logging at debug level.
-6. Every waiter receives the same `*Response`; upstream failures become `502`, timeouts `504`.
-7. Alongside requests, `sweep` calls `DeleteExpired` every `JANITOR_INTERVAL`, `PURGE /path` calls `Remove`, and `GET /_cache/stats` reads `Stats`.
-
-## Go specifics here
-
-1. `cmd/lru-cache/main.go:97` — `lru.WithTTL[string, *proxy.Response]` next to a bare `lru.WithOnEvict(...)`.
-   <details><summary>Explanation</summary>
-
-   Go infers type parameters only from the arguments of a call, never from where the result goes. `WithTTL` takes a `time.Duration`, which says nothing about `K` or `V`, so the caller has to spell them out. `WithOnEvict` takes a `func(string, *proxy.Response, lru.EvictReason)`, from which both are inferred. `lru.New` then infers its own `K` and `V` from the options it is given. Python's `TypeVar`s are erased at runtime; Go instantiates a real type, so it must know `K` and `V` at compile time.
-   </details>
-
-2. `lru/lru.go:245` — `el.Value.(*entry[K, V])`.
-   <details><summary>Explanation</summary>
-
-   `container/list` predates generics, so `list.Element.Value` is `any`. `x.(T)` is a type assertion: it checks at runtime that the interface holds exactly a `*entry[K, V]`, and panics if it does not. The two-value form `v, ok := x.(T)` would not panic. The single-value form is safe here because the cache is the only code that puts values into the list. The rest of the package is fully typed, so this is the one spot where static typing gives way.
-   </details>
-
-3. `lru/lru.go:147` — `c.mu.Unlock()` without `defer`, followed by `c.notify(evicted)`.
-   <details><summary>Explanation</summary>
-
-   `sync.Mutex` is not reentrant, unlike `threading.RLock`: if the goroutine holding it calls `Lock` again, it deadlocks. The `OnEvict` callback is user code and may call back into the cache, so it must run after the unlock. `defer c.mu.Unlock()` would only run when `Get` returns, after `notify`. So the `*Locked` helpers collect the evictions into a slice while the lock is held, and the public method unlocks explicitly before dispatching them.
-   </details>
-
-4. `internal/proxy/proxy.go:134` — `context.WithoutCancel(ctx)` inside the function passed to `DoChan`.
-   <details><summary>Explanation</summary>
-
-   The flight is shared by every request waiting on the key, but `ctx` belongs to whichever request started it. If the flight used that context, one client disconnecting would cancel the fetch for all of them. `WithoutCancel` keeps the context's values but drops its cancellation and deadline, so `http.Client.Timeout` is what bounds the fetch. Each waiter still stops waiting on its own `ctx.Done()` in the `select` below, and the result is cached even if nobody is left waiting for it.
-   </details>
-
-5. `cmd/lru-cache/main.go:155` — `type expirer interface { DeleteExpired() int }`.
-   <details><summary>Explanation</summary>
-
-   Go interfaces are satisfied implicitly: `*lru.Cache[string, *proxy.Response]` never names `expirer`, yet it can be passed to `sweep` because it has the method. The interface is declared by the consumer, sized to exactly what `sweep` calls. It also keeps `sweep` non-generic: without it, `sweep` would need its own `[K, V]` type parameters just to accept the cache. This is structural typing, the same idea as a `typing.Protocol`, except the compiler checks it at the call site.
-   </details>
+The first request is a MISS and the second a HIT; with `CACHE_SIZE=2` the third URL evicts the
+first, which the debug log reports. The upstream is on the internet, so this needs network access.
 
 ## Questions
 
-1. `Peek` neither counts a hit nor refreshes recency. Where does the proxy call it, and what would go wrong if it called `Get` there instead?
+Answer from the code first, then open the answer.
+
+1. `run` writes `lru.WithTTL[string, *proxy.Response](cfg.CacheTTL)` but a bare
+   `lru.WithOnEvict(...)`. Why the difference, and would
+   `lru.New[string, *proxy.Response](cfg.CacheSize, lru.WithTTL(cfg.CacheTTL))` compile?
+
    <details><summary>Answer</summary>
 
-   Inside the singleflight function in `Proxy.load`. It closes a race: a request can miss in `handleGet` just as an earlier flight for the same key stores its result and finishes, so the new request starts a second flight. The `Peek` returns the fresh entry instead of fetching again. With `Get`, the same logical request would be counted twice, once as a miss in `handleGet` and once more as a hit or miss, which skews `hit_ratio`, and it would also bump recency for a key nobody has been served yet.
+   Go infers a call's type arguments from that call's own arguments; the type its result is later
+   passed to plays no part. `WithOnEvict` receives a
+   `func(string, *proxy.Response, lru.EvictReason)`, which pins both `K` and `V`. `WithTTL` receives
+   only a `time.Duration`, which mentions neither, so the compiler stops with "in call to
+   lru.WithTTL, cannot infer K", even when `New` is instantiated explicitly, because `WithTTL(...)`
+   is a separate call checked on its own. `New` then infers its own `K` and `V` from the options it
+   is given. Rule: a type parameter that appears only in a function's result must be spelled out at
+   every call site, so APIs avoid generic helpers whose arguments do not mention it.
+
    </details>
 
-2. A client requests an uncached URL and disconnects after 100 ms, while the upstream takes 2 s. What happens to the fetch, to other clients waiting on the same URL, and to the cache?
+2. SIGTERM arrives. Which goroutines does `g.Wait()` wait for, what makes each of them return, and
+   what changes if `srv.Serve` fails on its own first?
+
    <details><summary>Answer</summary>
 
-   That client's `load` returns from `select` through `ctx.Done()`. `writeError` sees `context.Canceled`, logs "client left before upstream answered" and writes nothing. The fetch keeps going because it runs under `context.WithoutCancel`, bounded only by `UPSTREAM_TIMEOUT`. Other waiters receive the response from the same flight, and a `200` is stored in the cache, so the next request is a hit. `TestFetchOutlivesCanceledRequest` covers exactly this.
+   `signal.NotifyContext` cancels `ctx` and with it `gctx`, its child from `errgroup.WithContext`.
+   The shutdown goroutine wakes from `<-gctx.Done()` and calls `srv.Shutdown` with a fresh timeout
+   built on `context.WithoutCancel(gctx)`; `Serve` returns `http.ErrServerClosed` as soon as
+   `Shutdown` closes the listener, and that is mapped to `nil`; `sweep`, started only when
+   `CACHE_TTL` is positive, returns from its `select`. If `Serve` fails first, its goroutine returns
+   an error, the errgroup cancels `gctx`, the other two exit the same way, `g.Wait()` returns that
+   first error and `main` exits with status 1. Rule: under `errgroup.WithContext` a failed sibling
+   and a canceled parent look the same, so every goroutine must watch the group's context.
+
    </details>
 
-3. With `CACHE_TTL=5m`, `Len()` can report more entries than are actually servable. Why, and what bounds the memory held by entries nobody will ever read again?
+3. `proxy.Cache` is declared as `type Cache = lru.Cache[string, *Response]`. What breaks if the `=`
+   is removed?
+
    <details><summary>Answer</summary>
 
-   Expiry is lazy: an expired entry stays in the list until a `Get` touches it, until it reaches the back of the list and is pushed out by a `Set`, or until `DeleteExpired` runs. The service starts `sweep`, which calls `DeleteExpired` every `JANITOR_INTERVAL`. In the worst case, memory is bounded by `CACHE_SIZE × MAX_BODY_BYTES` plus headers, because capacity counts every entry, expired or not.
+   With `=`, `Cache` is an alias, a second name for exactly the same type, so `main` passes its
+   `*lru.Cache[string, *proxy.Response]` to `proxy.New` and the proxy calls `Get`, `Peek` and `Set`
+   on it. Without `=`, `Cache` becomes a new defined type with the same underlying struct but an
+   empty method set, because methods belong to the type they were declared on. Every
+   `p.cache.Get(...)` stops compiling ("type *Cache has no field or method Get"), and `main` could
+   pass its cache in only through an explicit conversion. Rule: `type A = B` gives an existing type
+   another name; `type A B` creates a new type with B's structure but none of its methods.
+
    </details>
 
-4. The oldest entry has already expired when a `Set` pushes the cache over capacity. Which counter goes up, which reason does `OnEvict` receive, and why is that the right choice?
+4. A client asks for an uncached URL and disconnects after 100 ms; the upstream takes 2 s, and two
+   other clients are waiting for the same URL. What happens to the fetch, to the other two, and to
+   the cache?
+
    <details><summary>Answer</summary>
 
-   `setLocked` checks the back element with `expiredLocked`, so `Expirations` goes up and the callback gets `ReasonExpired`. `Evictions` is meant to measure capacity pressure. An entry that was already dead would have been dropped anyway, and counting it as a capacity eviction would suggest the cache is too small when it is not.
+   All three calls to `load` joined one singleflight flight, and each waits in its own `select` on
+   its request's `ctx.Done()` and on the channel `DoChan` returned to it. The first client's context
+   is canceled, its `select` takes the `ctx.Done()` branch, and `writeError` only logs that the
+   client left. The fetch runs on `context.WithoutCancel(ctx)`, so the requester that started it
+   leaving does not cancel it; only the HTTP client's `Timeout` bounds it. After 2 s the other two
+   get the same `*Response` and a 200 is stored. Each `DoChan` channel holds one result, so the
+   flight never blocks on a caller that left. Rule: work shared by several requests must not run on
+   any one request's context; detach it and give it its own bound.
+
    </details>
 
-5. On `SIGTERM`, which goroutines are running, and what makes each one return? What changes if `Serve` fails on its own first?
+5. SIGTERM arrives while such a fetch is still running and every client that wanted it has gone.
+   Does `srv.Shutdown` wait for it?
+
    <details><summary>Answer</summary>
 
-   `signal.NotifyContext` cancels `ctx`, which cancels `gctx`. The errgroup runs up to three goroutines. The shutdown goroutine wakes on `gctx.Done()` and calls `srv.Shutdown` with a timeout derived from `context.WithoutCancel`, so the timeout is not cancelled immediately. `Serve` then returns `http.ErrServerClosed`, which is treated as success. `sweep` returns on `gctx.Done()`. If `Serve` fails first, it returns an error, and the errgroup cancels `gctx`, so shutdown and sweep exit the same way. `g.Wait()` returns that first error and `main` exits with status 1.
+   No. `Shutdown` closes the listeners and waits until every connection is idle, that is, until the
+   handlers have returned. The handlers for that URL returned when their clients left, and the fetch
+   runs in a goroutine that singleflight started and nothing tracks. So `Shutdown` returns at once,
+   `g.Wait()` and `run` return, and when `main` returns the process exits with the fetch cut off.
+   Here that only loses one cache fill. Rule: `http.Server.Shutdown` drains connections, not the
+   goroutines your handlers started; background work that must finish needs its own `WaitGroup` or
+   errgroup, waited on after `Shutdown`.
+
+   </details>
+
+6. Inside the function passed to `DoChan`, `load` calls `p.cache.Peek(key)` before fetching,
+   although `handleGet` has just missed. Which race does that close, and why `Peek` and not `Get`?
+
+   <details><summary>Answer</summary>
+
+   Between `handleGet`'s miss and its `DoChan` call, an earlier flight for the same key can store
+   its response and finish, and singleflight forgets a key as soon as its function returns. The late
+   request then starts a second flight, and the re-check turns it into a cache read instead of a
+   second upstream fetch: the check-then-act gap is closed by checking again inside the section that
+   serializes fills. `Peek` leaves the counters and recency alone, while `Get` would record a second
+   hit or miss for a request that `handleGet` has already counted and skew `hit_ratio`. Rule: when a
+   miss triggers an expensive fill, re-check the cache inside whatever serializes the fill.
+
+   </details>
+
+7. `Response.serve` copies every header slice with `slices.Clone` before putting it into
+   `w.Header()`, yet writes `resp.body` as is. Why the difference?
+
+   <details><summary>Answer</summary>
+
+   A cached `*Response` is shared by every request that hits it, concurrently and without a lock,
+   which is safe only while nobody changes it. A slice is a view of a backing array, so
+   `h[name] = values` would make each response's header point at the cache's array; any code that
+   later changed a value in place, say a middleware rewriting `h["Content-Type"][0]`, would race
+   with other requests and corrupt the cached entry. The body needs no copy because the `io.Writer`
+   contract forbids `Write` from modifying the slice it is given. Rule: data shared across
+   goroutines without a lock has to stay immutable, so copy slices and maps before handing them to
+   code that might modify them.
+
+   </details>
+
+8. `Get`, `Set`, `Remove`, `Purge` and `DeleteExpired` call `c.mu.Unlock()` explicitly and then
+   `c.notify(evicted)`, while `Peek`, `Len` and `Stats` use `defer`. What would `defer` break in the
+   first group, and what does the explicit unlock cost?
+
+   <details><summary>Answer</summary>
+
+   `notify` runs the user's `OnEvict`, which may call back into the cache. `sync.Mutex` is not
+   reentrant, unlike Python's `threading.RLock`: a goroutine that locks a mutex it already holds
+   blocks forever. With `defer`, the unlock would run only when the method returns, after `notify`,
+   so such a callback would deadlock; the `*Locked` helpers therefore collect evictions into a slice
+   under the lock, and the public method unlocks before calling out. The cost is that a panic
+   between `Lock` and `Unlock` would leave the mutex locked for good, so the locked region must stay
+   short and predictable. Rule: never call user-supplied code while holding a lock; collect under
+   the lock, call after releasing it.
+
    </details>

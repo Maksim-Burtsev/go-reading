@@ -1,118 +1,155 @@
-# 01-cli-wordfreq
+# 01 · cli-wordfreq
 
-A cobra CLI that counts Unicode word frequencies across files and stdin concurrently, and removes duplicate lines from a stream.
+`wordfreq count` prints the most frequent words across files and standard input, as a table or as
+JSON; `wordfreq dedupe` prints every distinct line once, in the order first seen, optionally with
+its number of occurrences. `count` reads several inputs at once, a bounded number at a time. It is a
+cobra command tree, with `golang.org/x/sync/errgroup` for the fan-out and `golang.org/x/text/cases`
+for case-insensitive matching.
 
-## Run
+## Run it
 
 ```sh
-go run ./apps/01-cli-wordfreq/cmd/wordfreq count --top 10 README.md CLAUDE.md; go run ./apps/01-cli-wordfreq/cmd/wordfreq dedupe --count CLAUDE.md
+go run ./apps/01-cli-wordfreq/cmd/wordfreq count --top 5 README.md CLAUDE.md
+go run ./apps/01-cli-wordfreq/cmd/wordfreq count --json --top 3 --min-len 5 README.md
+printf 'b\na\nb\nc\na\n' | go run ./apps/01-cli-wordfreq/cmd/wordfreq dedupe --count
+go run ./apps/01-cli-wordfreq/cmd/wordfreq count --log-level info --top 1 README.md
+go run ./apps/01-cli-wordfreq/cmd/wordfreq count README.md missing.txt
 ```
 
-## Where to start
-
-1. `cmd/wordfreq/main.go:run` — the whole process boundary: args, env, stdin/stdout/stderr come in as parameters and are handed to cobra.
-2. `internal/cli/root.go:NewRootCommand` — the command tree, the env-backed `--log-level` default and the logger built in `setUp`.
-3. `internal/cli/count.go:countCommand.run` — flag validation, the call into the domain package and the choice between table and JSON output.
-4. `internal/wordfreq/count.go:CountAll` — bounded concurrent fan-out over inputs with `errgroup`, merged under a mutex.
-5. `internal/wordfreq/scan.go:ScanWords` — the tokenizer, written as a `bufio.SplitFunc` that works on arbitrary chunk boundaries.
-
-## Data flow
-
-1. `main` builds a context canceled by SIGINT/SIGTERM and calls `run` with `os.Args`, `os.Getenv` and the standard streams.
-2. `run` builds the cobra tree, points its args/in/out/err at its own parameters and calls `ExecuteContext`; cobra parses flags and picks `count` or `dedupe`.
-3. The root `setUp` hook parses `--log-level` (default from `WORDFREQ_LOG_LEVEL`) into a JSON `slog` logger on stderr.
-4. `count`: `input.Names` turns operands into names (none means `-`), `wordfreq.CountAll` runs one goroutine per name, at most `--jobs` at a time.
-5. Each goroutine opens its name through `input.Opener` (a context-bound reader), scans words with `ScanWords`, case-folds them and counts into its own map, then merges it into the total.
-6. `Counts.Top` sorts by count descending, word ascending, and cuts to `--top`; the report is written with `tabwriter` or `encoding/json`.
-7. `dedupe`: inputs are read one after another into a single `dedupe.Set`; first-seen lines go straight to a buffered stdout, or with `--count` all lines are printed at the end.
-8. Errors are wrapped on the way up (`count: read a.txt: ...`), cobra returns them silently, and `main` prints once and exits 1.
-
-## Go specifics here
-
-1. `cmd/wordfreq/main.go:18` — `context.AfterFunc(ctx, stop)`
-   <details><summary>Explanation</summary>
-
-   `signal.NotifyContext` swallows SIGINT for as long as it is registered, so a process blocked on a
-   stdin read would ignore every Ctrl-C. `AfterFunc` runs `stop` as soon as the first signal cancels
-   `ctx`; that unregisters the handler and a second Ctrl-C gets the default behavior and kills the
-   process. `stop()` is also called by hand on line 20 because `os.Exit` does not run deferred calls.
-   </details>
-
-2. `internal/wordfreq/count.go:70` — `utf8.RuneCountInString(word) < minLen`
-   <details><summary>Explanation</summary>
-
-   A Go `string` is a read-only byte slice, and `len` returns bytes, not characters. Every Cyrillic
-   letter is two bytes in UTF-8, so `len("ёж")` is 4. `RuneCountInString` counts code points, which is
-   what Python's `len` does on a `str`. Indexing a string yields bytes; `for range` over it yields runes.
-   </details>
-
-3. `internal/wordfreq/count.go:104` — `g.Go(func() error {` using `name`
-   <details><summary>Explanation</summary>
-
-   Since Go 1.22 every loop iteration has its own `name` variable, so each closure captures a
-   different value. In Python a closure in a loop sees the last value (late binding); in Go before
-   1.22 this was the same bug. `g.Go` blocks once `SetLimit` goroutines are running, which is what
-   bounds concurrency. `errgroup.WithContext` on line 98 shadows `ctx` with one that is canceled on the
-   first returned error.
-   </details>
-
-4. `internal/wordfreq/count.go:121` — `(_ Counts, err error)` with `defer func() { err = ... }()`
-   <details><summary>Explanation</summary>
-
-   Named results are ordinary variables that `return` assigns before deferred calls run, so a
-   deferred closure can still change what the caller receives. Here it joins the `Close` error into
-   `err`; `errors.Join(nil, nil)` is `nil`. Results must be all named or all unnamed, hence the `_`.
-   </details>
-
-5. `internal/input/input.go:50` — `type readCloser struct { io.Reader; io.Closer }`
-   <details><summary>Explanation</summary>
-
-   Embedding promotes the methods of the embedded values: `Read` comes from the context-bound reader,
-   `Close` from the `*os.File`, and the struct satisfies `io.ReadCloser` without saying so. The same
-   structural typing lets `input.Opener` satisfy `wordfreq.Opener` and `dedupe.Opener`, interfaces
-   declared by the packages that consume them, which never import each other's types for it.
-   </details>
+Run `count` with no operands and press Ctrl-C twice to see question 1 happen.
 
 ## Questions
 
-1. `count a.txt a.txt` works, but `count a.txt - -` fails before reading anything. Why the difference?
+Answer from the code first, then open the answer.
+
+1. Run `count` with no operands at a terminal, so that it waits on standard input, and press
+   Ctrl-C. Nothing happens; a second Ctrl-C kills the process. Why does the first one not stop it,
+   and what has changed by the time the second one arrives?
+
    <details><summary>Answer</summary>
 
-   A file path can be opened twice, giving two independent readers. Standard input is one shared
-   stream: two goroutines would read it concurrently (a data race on the reader) and split its
-   contents between them. `input.Names` rejects a repeated `-` with `ErrStdinRepeated` up front.
+   `signal.NotifyContext` installs a handler for SIGINT, so the signal no longer terminates the
+   process; it only cancels `ctx`. Cancelling a context closes a channel and nothing else, and the
+   goroutine reading standard input is blocked inside `Read`, which no context can interrupt:
+   `contextReader` looks at `ctx` only between reads. `context.AfterFunc(ctx, stop)` calls `stop` as
+   soon as the first signal lands; that unregisters the handler, so the second SIGINT gets the
+   default action and kills the process. `main` calls `stop()` itself instead of deferring it
+   because `os.Exit` skips deferred calls. Rule: cancellation reaches only code that checks the
+   context, so a program that catches signals needs another way out when that code is stuck.
+
    </details>
 
-2. Inputs finish in random order and Go map iteration order is randomized. Why is the output still deterministic?
+2. `slow-producer | wordfreq dedupe` shows nothing for a long time, although new distinct lines
+   keep arriving and the help text says they are written while input is still being read. What
+   holds them back, and why does the command call `Flush` even when scanning failed?
+
    <details><summary>Answer</summary>
 
-   Merging is addition, which does not depend on order, so the final `Counts` is the same whichever
-   goroutine finishes first. `Counts.Top` then imposes a total order: `cmp.Or` compares by count
-   descending and falls back to the word ascending when counts tie.
+   The lines go into a `bufio.Writer`, which keeps writes in a 4 KiB buffer and passes them on only
+   when the buffer fills or `Flush` is called, and the command flushes once, at the end. A short
+   line can wait until a few hundred more arrive or the input ends. When scanning fails, for example
+   because the second input is missing, the command still flushes, so the lines already accepted
+   reach stdout before the error, and `if flushErr := bw.Flush(); err == nil` keeps the first error
+   instead of letting the flush result overwrite it. Flushing after every line would make output
+   immediate at the cost of one write system call per line. Rule: a `bufio.Writer` shows nothing
+   until it is flushed, so every exit path needs a `Flush` whose error is checked.
+
    </details>
 
-3. With `--jobs 4`, one of ten files does not exist. What happens to the others and what does the user see?
+3. `wordfreq.CountAll` and `dedupe.Set.ScanAll` each declare their own `Opener` interface and
+   never import package `input`, yet both are handed an `input.Opener`. For a file, `Open` returns
+   `readCloser{Reader: ..., Closer: f}`, a struct with no methods of its own. Why does all of this
+   type-check, and why does standard input get `io.NopCloser` instead?
+
    <details><summary>Answer</summary>
 
-   The failing goroutine returns the open error, and `errgroup` cancels the shared context. Readers
-   from `input.Opener` check the context before and after every `Read`, so inputs in flight stop with
-   `context.Canceled` at their next read, and the ones started later fail on their first read.
-   `g.Wait` returns only the first error, so the user sees `count: open x.txt: no such file or directory`
-   and exit status 1, with no partial table.
+   A Go type satisfies an interface by having its methods; there is no `implements` clause, so
+   `input.Opener` fits both consumer-declared `Opener` interfaces and neither side imports the other.
+   Embedding a field promotes its methods to the outer type: `readCloser` gets `Read` from the
+   embedded `*contextReader` and `Close` from the embedded `*os.File`, so reads go through the
+   context check while `Close` still closes the file. `Opener.Stdin` is a plain `io.Reader` (a
+   `strings.Reader` in tests) with no `Close` to promote, and it is not the command's to close;
+   `io.NopCloser` adds a no-op one so callers can close whatever `Open` returns. Rule: declare small
+   interfaces where they are consumed, and build implementations from parts by embedding.
+
    </details>
 
-4. Why is `cases.Fold()` created inside `Count` instead of once at package level?
+4. `count --jobs 4` gets ten files and the third one does not exist. What happens to the files
+   being read at that moment, to the ones not started yet, and what does the user see?
+
    <details><summary>Answer</summary>
 
-   A `cases.Caser` keeps internal state and must not be shared between goroutines, and `Count` runs
-   in several goroutines at once. A package-level caser would be a data race as well as global
-   mutable state. Creating one per call is cheap.
+   `errgroup.WithContext` cancels the group's context as soon as any function passed to `g.Go`
+   returns an error, and `g.Wait` returns that first error only; `SetLimit(4)` makes `g.Go` block
+   until a slot frees. The failed open cancels the context, but nothing is stopped by force: inputs
+   in flight fail with `context.Canceled` at their next `Read`, because `contextReader` checks the
+   context around every read. The loop still starts a goroutine for each remaining name, and each
+   one opens its file (`os.Open` takes no context) and fails on its first read. The user sees
+   `wordfreq: count: open x.txt: no such file or directory`, exit status 1, and no table. Rule: an
+   errgroup cancels a context, it does not stop goroutines; work ends only where code checks it.
+
    </details>
 
-5. `slow-producer | wordfreq dedupe` prints nothing for a long time, although new distinct lines keep arriving. Why, and where would you change it?
+5. Each goroutine in `CountAll` counts into a map of its own, with a `cases.Fold()` caser of its
+   own, and takes the mutex only to merge its result. What would go wrong with one shared map that
+   every goroutine increments, or with a single caser at package level?
+
    <details><summary>Answer</summary>
 
-   `onFirst` writes into a `bufio.Writer` in `internal/cli/dedupe.go`, which only reaches stdout when
-   its 4 KiB buffer fills or at the final `Flush`. Flushing after every line (for example behind a
-   `--line-buffered` flag) would make output immediate at the cost of one write syscall per line.
+   Go maps are not safe for concurrent writes: the runtime detects them and aborts the whole process
+   with `fatal error: concurrent map writes`, which `recover` cannot catch. A shared map would need
+   the mutex around every increment, serializing the counting. A `cases.Caser` keeps internal state,
+   and its documentation says not to share one between goroutines, so a package-level caser would be
+   a data race as well as global mutable state. With private state the lock is taken once per input.
+   Each closure also gets its own `name`: since Go 1.22 every loop iteration declares a fresh
+   variable, whereas Python closures bind late. Rule: give each goroutine its own mutable state and
+   combine the results under a lock at the end.
+
+   </details>
+
+6. Inputs finish in whatever order the scheduler picks, and ranging over a Go map visits keys in
+   random order. Why is the output of `count` identical on every run?
+
+   <details><summary>Answer</summary>
+
+   Merging only adds numbers, and addition does not care about order, so the final `Counts` is the
+   same whichever goroutine merges first. Map iteration order is deliberately randomized, so `Top`
+   copies the entries into a slice and sorts it with a comparator that leaves no ties: `cmp.Or`
+   returns its first non-zero argument, so the count decides and the word breaks ties. Without the
+   word comparison, words with equal counts could swap places between runs, because
+   `slices.SortFunc` is not stable and its input comes from a map. Rule: never let map iteration
+   order reach output; sort with a comparator that defines a total order.
+
+   </details>
+
+7. In `countInput`, a file is read to the end but its `Close` fails. Does the caller find out?
+   What would change if the results were unnamed, `(Counts, error)`?
+
+   <details><summary>Answer</summary>
+
+   `return counts, nil` first assigns the named results, then runs the deferred functions, and only
+   then returns to the caller, so a deferred closure can still replace `err`. Here it sets
+   `err = errors.Join(err, rc.Close())`, so a failed `Close` reaches the caller, and
+   `errors.Join(nil, nil)` is nil. With unnamed results the deferred closure could only assign to a
+   local variable, and the `Close` error would be lost silently. Results are either all named or all
+   unnamed, hence the `_` for the counts. Rule: to report an error from a deferred call, name the
+   error result and assign to it in the deferred closure.
+
+   </details>
+
+8. `ScanWords` checks `utf8.FullRune` before decoding and in several places returns
+   `start, nil, nil`. What is it guarding against, and why do its tests replay every case through
+   `iotest.OneByteReader`?
+
+   <details><summary>Answer</summary>
+
+   A `bufio.SplitFunc` sees whatever the `Scanner` has buffered, and a read can end mid-word or
+   mid-rune: Go strings hold UTF-8 bytes, and a Cyrillic letter takes two (hence
+   `utf8.RuneCountInString`, not `len`, for `--min-len`). `FullRune` catches a rune cut in half,
+   which `DecodeRune` would report as `RuneError`, a separator. Returning `start, nil, nil` keeps the
+   skipped separators consumed and asks for more data; only at EOF may a token end with the buffer.
+   `OneByteReader` makes every byte boundary a read boundary, so all of these paths run. A token must
+   fit the buffer (64 KiB by default, 16 MiB here via `Scanner.Buffer`) or the scan fails with
+   `bufio.ErrTooLong`. Rule: never assume a chunk from a reader ends on a rune or token boundary.
+
    </details>

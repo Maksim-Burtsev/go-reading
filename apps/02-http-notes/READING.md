@@ -1,102 +1,162 @@
-# 02-http-notes
+# 02 · http-notes
 
-A JSON CRUD API for notes on plain `net/http`: an in-memory store, request-id, logging, timeout and recover middleware, and graceful shutdown.
+A JSON API for notes on plain `net/http`: create, list, read, replace and delete notes kept in
+memory. Every response carries an `X-Request-ID`, every error comes back as a JSON envelope with a
+machine-readable code, a request that runs too long gets a 503, and SIGINT or SIGTERM lets requests
+in flight finish before the process exits. Bodies are checked with `go-playground/validator`, and
+settings come from environment variables through `caarlos0/env`.
 
-## Run
+## Run it
 
 ```sh
-go run ./apps/02-http-notes/cmd/http-notes   # then: curl -d '{"title":"hello"}' localhost:8080/notes
+go run ./apps/02-http-notes/cmd/http-notes
+# in another terminal:
+curl -si -d '{"title":"groceries","tags":["home"]}' localhost:8080/notes
+curl -s localhost:8080/notes
+curl -si -X PATCH localhost:8080/notes/42
+curl -s -d '{"tags":["home",""]}' localhost:8080/notes
+curl -si -H 'X-Request-ID: demo-1' localhost:8080/notes/missing
 ```
 
-## Where to start
-
-1. `cmd/http-notes/main.go:run` — config from env, logger, `http.Server` timeouts, and the signal-driven graceful shutdown.
-2. `internal/httpapi/handler.go:NewHandler` — the route table and the order of the middleware chain.
-3. `internal/httpapi/notes.go:createNote` — a typical handler: decode, validate, call the store, respond.
-4. `internal/httpapi/respond.go:writeError` — how every error becomes a status code and the JSON error envelope.
-5. `internal/notes/store.go:Update` — the store: lock discipline, the sentinel error, and copy-out semantics.
-
-## Data flow
-
-1. `http.Server` accepts the connection, enforces the read/write timeouts and calls the handler built by `NewHandler`.
-2. `withRequestID` takes `X-Request-ID` (or generates a UUID), puts it in the context and echoes it in the response.
-3. `logRequests` swaps in a `statusRecorder` and logs method, path, status, size and duration once the chain returns.
-4. `withTimeout` runs the rest in `http.TimeoutHandler`: the response is buffered and replaced with a 503 JSON body if the deadline passes.
-5. `recoverPanics` turns a panic into an `ERROR` log with the stack and a 500 envelope.
-6. `ServeMux` matches `METHOD /path/{id}`; `api.handle` adapts the error-returning handler and routes any error to `writeError`.
-7. The handler decodes with `MaxBytesReader` and `DisallowUnknownFields`, validates with `validator`, and calls `notes.Store`.
-8. The store works under a `sync.RWMutex` and hands back copies; `writeJSON` serialises the response DTO.
-
-## Go specifics here
-
-1. `internal/notes/store.go:128` — a value receiver that clones a field
-
-   <details><summary>Explanation</summary>
-
-   `n` is already a copy of the struct, but a struct copy only copies the slice header (pointer, length, capacity), not the array behind it. Without `slices.Clone`, a caller doing `note.Tags[0] = "x"` would write straight into the map-held value, outside the mutex. Python has the same trap with a list inside a dataclass; what makes it easy to miss in Go is that `n, ok := s.notes[id]` really does copy the struct, so the copy looks deep when it is not.
-   </details>
-
-2. `internal/httpapi/notes.go:36` — replacing a nil slice with an empty one
-
-   <details><summary>Explanation</summary>
-
-   `encoding/json` marshals a nil slice as `null` and an empty slice as `[]`. A note created without tags stores `nil` (because `slices.Clone(nil)` is `nil`), so without this branch clients would get `"tags": null`. The same reason is behind `make([]noteResponse, 0, len(all))` in `listNotes`.
-   </details>
-
-3. `internal/httpapi/requestid.go:61` — overriding methods that the embedded interface already provides
-
-   <details><summary>Explanation</summary>
-
-   Embedding `slog.Handler` promotes its methods, but promotion is not inheritance: the promoted `WithAttrs` returns the inner handler, not a `requestIDHandler`. Any `logger.With(...)` would then silently drop the wrapper and every record logged through it would lose `request_id`. Overriding `WithAttrs` and `WithGroup` re-wraps the result.
-   </details>
-
-4. `internal/httpapi/middleware.go:57` — deferring a method instead of a closure
-
-   <details><summary>Explanation</summary>
-
-   `recover()` only stops a panic when it is called directly by the deferred function. `recoverPanic` is the deferred function here, so calling `recover()` inside it works; moving that call one level deeper into a helper would return `nil` and the panic would propagate. Passing `w` and `r` as arguments also means they are evaluated when `defer` executes, not when the panic happens.
-   </details>
-
-5. `cmd/http-notes/main.go:80` — `context.WithoutCancel` under `WithTimeout`
-
-   <details><summary>Explanation</summary>
-
-   By this line `ctx` is done (SIGTERM arrived), and any context derived from it is born cancelled, so `srv.Shutdown` would return immediately. `context.WithoutCancel` keeps the values but detaches the cancellation, and `WithTimeout` then gives the drain its own budget.
-   </details>
+Stop the server with Ctrl-C to see the shutdown log lines. Every field of `config` can be set from
+the environment.
 
 ## Questions
 
-1. Delete the `WithAttrs` method from `requestIDHandler`. Which assertion in `TestRequestID` fails, and why only that one?
+Answer from the code first, then open the answer.
+
+1. SIGTERM arrives while a client is still uploading a request body. Is that request's context
+   cancelled? And why does `run` build the shutdown context from `context.WithoutCancel(ctx)`
+   rather than from `ctx`?
 
    <details><summary>Answer</summary>
 
-   The handler inside the test logs through `logger.With(slog.String("component", "test"))`. Without the override, `With` returns the bare `JSONHandler`, so that record has no `request_id` and the loop over records fails on the first one. The `http request` record is logged by the original logger, which still has the wrapper, so it keeps passing.
+   No. `signal.NotifyContext` cancels only `run`'s context; request contexts come from the server's
+   `BaseContext`, `context.Background()` by default, so the signal just ends the `select` in `run`.
+   `srv.Shutdown` then closes the listener and idle connections and waits for active requests until
+   its own context is done. By then `ctx` is already cancelled, and a timeout derived from it would
+   be born cancelled: `Shutdown` would return `context.Canceled` at once, `run` would fail, and the
+   process would exit 1 in the middle of that upload. `WithoutCancel` keeps the values of `ctx` but
+   not its cancellation, and `WithTimeout` gives the drain its own `SHUTDOWN_TIMEOUT`. Rule: cleanup
+   after cancellation needs a context detached from the cancelled one, with its own deadline.
+
    </details>
 
-2. Why is `recoverPanics` wrapped inside `withTimeout` and not outside it?
+2. `loadConfig` requires `HANDLER_TIMEOUT` to be shorter than `WRITE_TIMEOUT`. Suppose that check
+   were gone and a request ran past `WRITE_TIMEOUT`. What would the client receive, and what would
+   the access log say?
 
    <details><summary>Answer</summary>
 
-   `http.TimeoutHandler` runs the inner handler in its own goroutine. A panic there is caught by `TimeoutHandler` and re-raised in the serving goroutine, so a recover placed outside would log the stack of the re-panic in `TimeoutHandler.ServeHTTP` instead of the handler that failed. Inside, the recover runs in the handler's goroutine with the original stack, and its 500 goes into the timeout buffer like any other response. `logRequests` stays outside both so it sees the final status, including 503 and 500.
+   `WriteTimeout` is not a request timeout. It sets a deadline on the connection once the request
+   headers are read; after it every write to that connection fails, while the handler keeps running.
+   `http.TimeoutHandler` buffers the response and writes it only when the handler returns or its own
+   timer fires, so with a longer handler timeout the 503, or a late success, is written after the
+   deadline. The client sees the connection close with no response at all (Go's client reports
+   `EOF`), while `logRequests`, which only sees the status and bytes handed to the writer, logs a
+   503 or 200 that never arrived. Rule: server timeouts are connection deadlines that fail I/O;
+   bound the work itself with a context or a `TimeoutHandler` that fires first.
+
    </details>
 
-3. `PATCH /notes/42` returns a JSON 405 with `Allow: GET, PUT, DELETE`. Which pattern handles it, and what would the client get if that line were removed?
+3. `NewHandler` applies `recoverPanics` first, then `withTimeout`, `logRequests` and
+   `withRequestID`, so a request passes through them in the opposite order. A handler panics. Why
+   must `recoverPanics` sit inside `withTimeout`, and what would the client get with no
+   `recoverPanics` at all?
 
    <details><summary>Answer</summary>
 
-   The method-less pattern `/notes/{id}` matches every method; the patterns with a method are more specific, so they win for GET, PUT and DELETE, and everything else falls through to `methodNotAllowed`. Without it the catch-all `/` would match `PATCH /notes/42` and answer with a JSON 404. `ServeMux` only produces its own plain-text 405 when no pattern at all matches the request, and `/` always matches.
+   `recover` stops a panic only when a deferred function calls it directly, in the goroutine that
+   is panicking; that is why `recoverPanic` itself is the deferred call. `http.TimeoutHandler` runs
+   the wrapped handler in a goroutine of its own. Inside it, `recoverPanic` logs the original stack
+   and its 500 lands in the timeout buffer like any response. `TimeoutHandler` also recovers in its
+   goroutine and panics again in the serving one, so a recover placed outside would still answer 500
+   but log the stack of that second panic. With none, `net/http` recovers per connection, logs
+   `http: panic serving ...` and closes it: the client gets no response and `logRequests` logs
+   nothing. Rule: a panic can be recovered only in its own goroutine, so recover where the work runs.
+
    </details>
 
-4. `List` unlocks by hand before sorting instead of using `defer` like every other method. Why sort at all, and why is sorting outside the lock safe?
+4. `statusRecorder` embeds `http.ResponseWriter`, and `requestIDHandler` embeds `slog.Handler`.
+   What does embedding give each of them for free, and why does `requestIDHandler` still define
+   `WithAttrs` and `WithGroup`, which the embedded handler already has?
 
    <details><summary>Answer</summary>
 
-   Go randomises map iteration order, so without sorting two identical requests could list notes in different orders. `out` holds clones built while the read lock was held, so nothing else can reach it; sorting it after `RUnlock` shortens the time writers wait.
+   Embedding promotes the inner value's methods: `statusRecorder` takes `Header` from the real
+   writer and overrides only `WriteHeader` and `Write`; `requestIDHandler` takes `Enabled` and
+   overrides `Handle`. Promotion is not inheritance: a promoted method runs on the inner value and
+   returns what it returns. `logger.With(...)` calls `WithAttrs`, and the promoted one would hand
+   back the bare JSON handler, so records logged through the derived logger would silently lose
+   `request_id`; the overrides re-wrap the result. Promotion also stops at the field's static type:
+   the writer's `Flush` is hidden behind `statusRecorder`, hence its `Unwrap`. Rule: a wrapper that
+   embeds an interface must override every method that returns a new instance of that interface.
+
    </details>
 
-5. A request is in flight when SIGTERM arrives. Is its context cancelled, and what bounds how long the process waits for it?
+5. `Store.Get` returns `fmt.Errorf("get note %q: %w", id, ErrNotFound)`, and a malformed body
+   produces an `*httpError`. How does `writeError` turn each into a status code, and what would
+   the client get if the store wrapped with `%v` instead of `%w`?
 
    <details><summary>Answer</summary>
 
-   No. `signal.NotifyContext` cancels only `run`'s context, and the server does not derive request contexts from it (no `BaseContext`). `srv.Shutdown` closes the listener, closes idle keep-alive connections and waits for active ones, bounded by `SHUTDOWN_TIMEOUT`. Each request is also bounded by `HANDLER_TIMEOUT`, which `loadConfig` requires to be shorter than `WRITE_TIMEOUT`. If the shutdown budget runs out, `Shutdown` returns `context.DeadlineExceeded`, `run` returns it and `main` exits with status 1.
+   `%w` makes the new error wrap the old one: the text reads the same, and the cause stays reachable
+   through `Unwrap`, which `errors.Is` and `errors.As` follow down the chain. `writeError` checks a
+   sentinel with `errors.Is(err, notes.ErrNotFound)`, a comparison with one package-level value, and
+   a typed error with `errors.As(err, &httpErr)`, which finds the first `*httpError` in the chain and
+   hands it back with its status and code. With `%v` the text would not change but the chain would
+   be cut, nothing would match, and a missing note would fall through to `default`: an error log and
+   a 500 instead of a 404. Rule: wrap with `%w` when callers may need the cause, match with
+   `errors.Is` or `errors.As`, and keep matching on error text (as for unknown JSON fields) a last resort.
+
+   </details>
+
+6. `POST /notes` with `{"title":"a"} {"title":"b"}` gets a 400, but `{"title":"a"}` followed by a
+   newline is accepted. What does the second `Decode` in `decodeJSON` check, and what would a
+   single `Decode` let through?
+
+   <details><summary>Answer</summary>
+
+   `json.Decoder` reads a stream of JSON values, and one `Decode` consumes exactly one of them,
+   leaving the rest of the body unread. A single call would accept the first object and silently
+   ignore anything after it, a second object or plain garbage. Decoding again into an empty struct
+   must return `io.EOF`, which happens only when nothing but whitespace is left. `MaxBytesReader`
+   caps what the decoder may read, so a body over 64 KiB fails with `*http.MaxBytesError` and becomes
+   a 413, and `DisallowUnknownFields` turns an unexpected key into an error instead of dropping it.
+   `json.Unmarshal` rejects trailing data by itself but needs the whole body in memory first. Rule:
+   treat `json.Decoder` as a stream reader; bound its input and check that the input ended.
+
+   </details>
+
+7. A note created without tags is stored with `Tags == nil`. Why does the API still answer
+   `"tags": []`, and what would change if `newNoteResponse` passed `n.Tags` through unchanged?
+
+   <details><summary>Answer</summary>
+
+   `encoding/json` encodes a nil slice as `null` and an empty, non-nil slice as `[]`. The request had
+   no `tags`, so the decoded field is nil, and `slices.Clone` keeps nil as nil, so the store holds
+   nil. `newNoteResponse` swaps it for `[]string{}`; without that, clients would get `"tags": null`,
+   and a Python client looping over `note["tags"]` would fail on `None`. `listNotes` starts from
+   `make([]noteResponse, 0, len(all))` for the same reason, so an empty store answers
+   `{"notes":[]}`. Inside Go the difference rarely matters: `len`, `range` and `append` treat a nil
+   slice as empty. Rule: decide between `null` and `[]` explicitly wherever a slice crosses a JSON
+   boundary.
+
+   </details>
+
+8. `Store.Update` reads `n, ok := s.notes[id]`, edits `n` and stores it back with
+   `s.notes[id] = n`, and every method that returns a `Note` passes it through `clone`. Why not
+   assign `s.notes[id].Title` directly, and why clone a value that is already a copy?
+
+   <details><summary>Answer</summary>
+
+   Indexing a map yields a copy of the element, and map elements are not addressable, so
+   `s.notes[id].Title = in.Title` does not compile; `Update` edits the copy and stores it back while
+   it still holds the lock. The copy is shallow: a slice field is a small header (pointer, length,
+   capacity) pointing at a backing array the copy shares. Without `slices.Clone`, a caller's `Note`
+   would share `Tags` with the stored one, and `note.Tags[0] = "x"` would change the store behind
+   its mutex. No handler writes into `Tags` today, so nothing breaks yet; the clones are what keep
+   the promise "callers never share memory with the store". Rule: a struct copy is shallow; slices,
+   maps and pointers inside it share memory until you copy them.
+
    </details>

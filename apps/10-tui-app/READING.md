@@ -1,89 +1,155 @@
-# 10-tui-app
+# 10 · tui-app
 
-A two-pane terminal browser for a JSON task list, built on Bubble Tea v2 (Model-Update-View) and Lip Gloss.
+A two-pane terminal browser for a JSON task list: move through the tasks, filter them by title or tag,
+read a task's details, and toggle it done. Toggled statuses are written back to the file when you quit.
+It is built on Bubble Tea v2, which runs the Elm architecture (a model, an `Update` function and a
+`View`), with Bubbles components and Lip Gloss styling.
 
-## Run
+## Run it
 
-`go run ./apps/10-tui-app/cmd/tui-app` from the repository root (`-file path/to/tasks.json` or `TASKS_FILE` picks another file; toggled statuses are written back to the file on quit).
+```sh
+go run ./apps/10-tui-app/cmd/tui-app
 
-## Where to start
+# quitting after a toggle rewrites the bundled file; this restores it
+git checkout -- apps/10-tui-app/tasks.json
+```
 
-1. `cmd/tui-app/main.go:run` — the whole lifecycle: flags, load, run the program, save the final model.
-2. `internal/task/file.go:Load` — strict JSON decoding and validation that reports every problem at once.
-3. `internal/ui/model.go:Update` — the message router: window size, force quit, then filter or browse mode.
-4. `internal/ui/model.go:updateBrowse` — every key binding outside filter mode and the state change it causes.
-5. `internal/ui/view.go:View` — the frame rendered from state: header, two panes, footer.
-
-## Data flow
-
-1. `run` loads and validates `tasks.json` into `[]task.Task` and builds the initial `ui.Model`.
-2. `tea.Program` puts the terminal in raw mode and decodes stdin bytes into `tea.KeyPressMsg` values.
-3. Each message goes to `Model.Update`, which returns a new model and an optional `tea.Cmd`.
-4. Browse keys move the cursor, switch panes, or toggle a status; filter keys go to the `textinput` child, and `applyFilter` recomputes the visible indices.
-5. Cursor, filter, and size changes re-render the selected task into the `viewport` child through `syncDetails`.
-6. After every update the program calls `View`, and the renderer writes only the changed cells to stdout.
-7. `q` or `ctrl+c` return `tea.Quit`; `Run` hands back the final model, and `run` saves it atomically if anything changed.
-
-## Go specifics here
-
-1. `internal/ui/model.go:90` — value receiver on `Update`
-   <details><summary>Explanation</summary>
-
-   `m` is a copy of the model the program holds. Every assignment inside `Update` changes only that copy, and the copy is returned as the new state. Nothing changes unless it is returned, so a `return m, nil` at the right place is the whole update. The private helpers (`resize`, `applyFilter`, `toggleDone`) have pointer receivers; calling them on the local copy `m` is legal because a local variable is addressable, and Go takes `&m` automatically.
-   </details>
-
-2. `internal/ui/model.go:228` — `slices.Clone` before a write
-   <details><summary>Explanation</summary>
-
-   Copying a struct copies the slice header (pointer, length, capacity), not the elements. Without the clone, `m.tasks[i].Status = ...` would write into the backing array shared with the previous model, so the "old" state would change too. `TestUpdateToggleDone` checks that the initial model and the caller's slice stay untouched. `applyFilter` allocates a fresh `visible` slice for the same reason instead of reusing `m.visible[:0]`.
-   </details>
-
-3. `internal/task/task.go:53` — struct with an embedded `time.Time`
-   <details><summary>Explanation</summary>
-
-   An embedded field has no name; its methods are promoted, so `t.Due.IsZero()`, `t.Due.Format(...)` and `t.Due.Before(...)` work directly on `Date`. `Date` declares its own `MarshalJSON`/`UnmarshalJSON`, which take precedence over the promoted `time.Time` ones and switch the wire format to `YYYY-MM-DD`. The `omitzero` tag option calls the promoted `IsZero` to drop a missing due date. `UnmarshalJSON` has a pointer receiver because it must modify the value.
-   </details>
-
-4. `internal/ui/model.go:114` — `return m, tea.Quit`
-   <details><summary>Explanation</summary>
-
-   `tea.Cmd` is `func() tea.Msg`. `tea.Quit` is passed as a function value, not called. The program runs returned commands on its own goroutines and feeds their results back as messages; when `tea.Quit` runs it returns a `tea.QuitMsg`, which stops the event loop. `Update` itself never performs I/O, which is why the tests call it directly and inspect the returned command with `cmd()`.
-   </details>
-
-5. `cmd/tui-app/main.go:72` — `final.(ui.Model)` with `ok`
-   <details><summary>Explanation</summary>
-
-   `Run` returns the final state as the `tea.Model` interface. A type assertion recovers the concrete `ui.Model` so `Modified` and `Tasks` are reachable. The two-value form never panics; the one-value form `final.(ui.Model)` would panic on a mismatch. It asserts `ui.Model`, not `*ui.Model`, because `Update` returns the model by value.
-   </details>
+Keys: j/k move, enter switches panes, / filters, esc clears the filter, x toggles done, q or ctrl+c
+quits and saves any toggles. `-file` or `TASKS_FILE` opens another task file.
 
 ## Questions
 
-1. While the filter input is focused, why does `q` become part of the query instead of quitting, and why does `ctrl+c` still quit?
+Answer from the code first, then open the answer.
+
+1. `run` cancels its context on SIGINT and SIGTERM, hands it to Bubble Tea with `tea.WithContext`, and
+   also passes `tea.WithoutSignalHandler()`. A user quits with ctrl+c; another session is ended with
+   `kill -TERM`. What happens to toggled statuses in each case, and what would change without
+   `WithoutSignalHandler`?
+
    <details><summary>Answer</summary>
 
-   `Update` checks `ForceQuit` (`ctrl+c`) before anything else, then routes every message to `updateFilter` while `focus == focusFilter`. `updateFilter` only intercepts `enter` and `esc`; everything else, including `q`, goes to the `textinput` model. The `Quit` binding is matched only in `updateBrowse`, which is never reached in filter mode.
+   In raw mode ctrl+c is not turned into SIGINT: the byte arrives on stdin, `Update` matches `ForceQuit`
+   and returns `tea.Quit`, and `run` saves once `Run` returns cleanly. SIGTERM cancels `ctx` through
+   `signal.NotifyContext`: Bubble Tea stops, restores the terminal and returns an error wrapping
+   `tea.ErrProgramKilled` and `context.Canceled`, and `run` returns before `task.Save`, so the toggles
+   are lost and the exit status is 1. Without `WithoutSignalHandler`, Bubble Tea would subscribe to the
+   same signals (`os/signal` delivers to every registered channel) and turn SIGTERM into a `QuitMsg`, a
+   normal quit that saves, racing the cancellation. Rule: let one component own process signals, and
+   tell libraries that install their own handlers to stand down.
+
    </details>
 
-2. The user moves to the third task and types a query that the task still matches. Which task is selected afterwards, and what if it no longer matches?
+2. While the filter input is focused, typing q adds a q to the query, yet ctrl+c still quits. Where in
+   `Update` is that decided, and what would break if the `ForceQuit` check moved below the focus switch?
+
    <details><summary>Answer</summary>
 
-   `applyFilter` remembers the selected task index before recomputing `visible`, then looks it up with `slices.Index`. If it is still visible, the cursor moves to its new position, so the selection survives. If not, `slices.Index` returns -1 and `max(-1, 0)` puts the cursor on the first match.
+   `Update` handles `tea.WindowSizeMsg`, then checks for `ForceQuit`, and only then routes. While
+   `focus` is `focusFilter`, every message goes to `updateFilter`, which intercepts enter and esc and
+   passes everything else, q included, to the `textinput` model. The `Quit` binding is matched only in
+   `updateBrowse`, which filter mode never reaches. Moved below the switch, the `ForceQuit` check would
+   never see a key in filter mode: ctrl+c would go to the text input and do nothing, and the user would
+   have to press esc or enter first. Rule: in a message-driven UI the order of checks in `Update`
+   decides which messages are global and which belong to a mode, so global ones come first.
+
    </details>
 
-3. How can a caller of `task.Load` tell a duplicate ID apart from a malformed file, given that validation returns all problems as one error?
+3. Pressing q makes `updateBrowse` return `tea.Quit`, and the file is saved in `run` after `program.Run`
+   returns rather than in `Update`. Why is quitting expressed as a returned value, and why must the save
+   stay out of `Update`?
+
    <details><summary>Answer</summary>
 
-   `validate` wraps each problem with `%w` around a sentinel (`ErrInvalidTask`, `ErrDuplicateID`) and combines them with `errors.Join`. `errors.Is(err, task.ErrDuplicateID)` walks the joined tree and finds it. Decoding failures are wrapped as `ErrMalformed` with a double `%w`, so the underlying `json` error stays reachable too.
+   `tea.Cmd` is `func() tea.Msg`, and `tea.Quit` is passed as a function value, not called. The program
+   runs each returned command on its own goroutine and feeds the message it produces back into the event
+   loop; a `QuitMsg` ends the loop. `Update` and `View` run on that single loop goroutine, one message
+   at a time, so blocking I/O in `Update` would freeze input and rendering. `Update` would also stop
+   being a function of model and message that tests can call directly, as these tests do before checking
+   `cmd()` for a `QuitMsg`. Commands run concurrently and in no set order, so work that must finish
+   before exit happens after `Run` returns the final model. Rule: `Update` computes the next state and
+   describes side effects as commands, the same discipline as a Redux reducer.
+
    </details>
 
-4. If the process receives SIGTERM while the TUI is open, are toggled statuses saved? What does the process exit with?
+4. `Update` has a value receiver, so it works on a copy of the model, and pointer-receiver helpers such
+   as `toggleDone` change that copy. Why does `toggleDone` still call `slices.Clone` before it writes a
+   status, and why does `applyFilter` build a new `visible` slice instead of appending to
+   `m.visible[:0]`?
+
    <details><summary>Answer</summary>
 
-   No. `signal.NotifyContext` cancels `ctx`; `tea.WithContext(ctx)` makes the program stop, restore the terminal, and return an error wrapping `tea.ErrProgramKilled` and `context.Canceled`. `run` returns that error before reaching `task.Save`, and `main` exits with status 1. Only `tea.Quit` (`q`, `ctrl+c`) ends `Run` without an error and leads to the save.
+   A pointer method called on the local `m` gets `&m` automatically, because a local variable is
+   addressable, so the helper's writes land in the copy `Update` returns; that covers plain fields such
+   as `focus` and `cursor`. Copying the struct copies the `tasks` slice header, not its array, so the
+   copy, the previous model and the slice `run` got from `task.Load` share elements, and
+   `m.tasks[i].Status = ...` would change all of them. `slices.Clone` gives the new model its own array
+   first, which `TestUpdateToggleDone` checks. Appending to `m.visible[:0]` would overwrite the previous
+   model's indices the same way. Rule: a value receiver protects fields, not the memory their slices,
+   maps and pointers refer to.
+
    </details>
 
-5. Why does `task.Save` write to a temporary file and rename it instead of writing to the path directly?
+5. Entering filter mode is written as `cmd := m.filter.Focus()` followed by `return m, cmd`, and `Focus`
+   has a pointer receiver. What could go wrong with the shorter `return m, m.filter.Focus()`?
+
    <details><summary>Answer</summary>
 
-   A crash or a full disk in the middle of a direct write would leave a truncated task file. `os.CreateTemp` in the same directory followed by `os.Rename` replaces the file in one step on the same filesystem, so readers see either the old or the new content. The deferred `os.Remove` cleans up the temporary file when any step before the rename fails; after a successful rename it has nothing to remove.
+   `Focus` sets the text input's focus flag through its pointer receiver, so the call changes `m`, and
+   the model returned must be read after it. The spec evaluates the calls in a statement left to right,
+   but it does not say when a plain operand such as `m` is read relative to them. If `m` were copied
+   first, the program would get back an unfocused input, and `textinput` ignores every key until it is
+   focused, so typing after `/` would do nothing. gc happens to make the call first, so the one-liner
+   passes the tests today, but no rule guarantees it; the same trap hides in `return x, f(&x)`.
+   Rule: when a call in a statement mutates a variable the same statement also reads, split the
+   statement so the order is explicit.
+
+   </details>
+
+6. `Date` embeds `time.Time`. When a task file is loaded and saved, which methods does `encoding/json`
+   call for the due date, and how does a task without a due date come back out without a `due` key?
+
+   <details><summary>Answer</summary>
+
+   Embedding promotes the methods of `time.Time` to `Date`, so `IsZero`, `Format` and `Before` work on a
+   `Date` directly; the field is still named `Time`, which is how `UnmarshalJSON` assigns `d.Time`.
+   `Date` declares its own `MarshalJSON` and `UnmarshalJSON`, which are shallower than the promoted
+   `time.Time` ones and win, switching the wire format from RFC 3339 to `YYYY-MM-DD`. `UnmarshalJSON`
+   has a pointer receiver because it writes the value; `encoding/json` calls it through the field's
+   address, and `null` leaves the zero value. On save, the `omitzero` tag option calls the promoted
+   `IsZero`, so a zero `Date` is dropped. Rule: embedding gives the outer type the inner type's methods,
+   and a method of the same name on the outer type overrides just that one behaviour.
+
+   </details>
+
+7. `task.Load` reports every validation problem at once as one error. How can a caller tell a duplicate
+   id from a malformed file, and what does the double `%w` in the decode path give it?
+
+   <details><summary>Answer</summary>
+
+   `validate` wraps each problem with `%w` around a sentinel, `ErrInvalidTask` or `ErrDuplicateID`, and
+   combines them with `errors.Join`. `errors.Is` walks the whole tree, every joined error and every
+   wrap, so `errors.Is(err, task.ErrDuplicateID)` finds a duplicate even when it is the third problem
+   listed. Decode failures use `fmt.Errorf("%w: %w", ErrMalformed, err)`, which wraps both operands: a
+   caller can test for `ErrMalformed` and still reach the cause, such as `io.ErrUnexpectedEOF` for a
+   truncated file, or a `*time.ParseError` for a bad due date via `errors.As`. Rule: expose sentinels or
+   error types for the conditions callers branch on, wrap with `%w`, and match with `errors.Is` and
+   `errors.As`, never on message text.
+
+   </details>
+
+8. `task.Save` could have been one `os.WriteFile`. Instead it resolves a symlink at the path, writes a
+   temporary file next to the target with the target's permission bits, syncs it, and renames it over
+   the target. What does the rename buy, and why does it need the other steps?
+
+   <details><summary>Answer</summary>
+
+   `os.WriteFile` truncates the file and then writes it, so a crash or a full disk midway leaves a
+   truncated task file. A rename within one filesystem swaps the directory entry atomically, so readers
+   see the old file or the complete new one; the temporary file sits beside the target because a rename
+   cannot cross filesystems. `Sync` makes the data durable before the rename is, or a power loss can
+   keep the rename and lose the data. A rename replaces the entry rather than editing the file: the new
+   file would get `os.CreateTemp`'s mode 0600 and a symlink would be replaced, hence `Chmod` and
+   `filepath.EvalSymlinks`. Rule: write-then-rename gives atomic replacement, fsync makes it durable,
+   and mode or links survive only if you carry them over.
+
    </details>
