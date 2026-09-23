@@ -39,6 +39,7 @@ type Input struct {
 type Store struct {
 	mu    sync.RWMutex
 	notes map[string]Note
+	byTag map[string]map[string]struct{}
 	now   func() time.Time
 }
 
@@ -46,6 +47,7 @@ type Store struct {
 func NewStore() *Store {
 	return &Store{
 		notes: make(map[string]Note),
+		byTag: make(map[string]map[string]struct{}),
 		now:   func() time.Time { return time.Now().UTC() },
 	}
 }
@@ -66,6 +68,7 @@ func (s *Store) Create(in Input) Note {
 	defer s.mu.Unlock()
 
 	s.notes[n.ID] = n
+	s.index(n.ID, n.Tags)
 	return n.clone()
 }
 
@@ -90,9 +93,29 @@ func (s *Store) List() []Note {
 	}
 	s.mu.RUnlock()
 
-	slices.SortFunc(out, func(a, b Note) int {
-		return cmp.Or(a.CreatedAt.Compare(b.CreatedAt), strings.Compare(a.ID, b.ID))
-	})
+	slices.SortFunc(out, compareNotes)
+	return out
+}
+
+// ListByTag returns the notes that carry tag, ordered like List. A positive
+// limit caps the number of notes returned.
+func (s *Store) ListByTag(tag string, limit int) []Note {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	ids := s.byTag[tag]
+	out := make([]Note, 0, len(ids))
+	for id := range ids {
+		if limit > 0 && len(out) == limit {
+			break
+		}
+		n, err := s.Get(id)
+		if err != nil {
+			continue
+		}
+		out = append(out, n)
+	}
+	slices.SortFunc(out, compareNotes)
 	return out
 }
 
@@ -110,6 +133,7 @@ func (s *Store) Update(id string, in Input) (Note, error) {
 	n.Tags = slices.Clone(in.Tags)
 	n.UpdatedAt = s.now()
 	s.notes[id] = n
+	s.index(id, n.Tags)
 	return n.clone(), nil
 }
 
@@ -122,7 +146,30 @@ func (s *Store) Delete(id string) error {
 		return fmt.Errorf("delete note %q: %w", id, ErrNotFound)
 	}
 	delete(s.notes, id)
+	s.unindex(id)
 	return nil
+}
+
+func (s *Store) index(id string, tags []string) {
+	for _, tag := range tags {
+		if s.byTag[tag] == nil {
+			s.byTag[tag] = make(map[string]struct{})
+		}
+		s.byTag[tag][id] = struct{}{}
+	}
+}
+
+func (s *Store) unindex(id string) {
+	for tag, ids := range s.byTag {
+		delete(ids, id)
+		if len(ids) == 0 {
+			delete(s.byTag, tag)
+		}
+	}
+}
+
+func compareNotes(a, b Note) int {
+	return cmp.Or(a.CreatedAt.Compare(b.CreatedAt), strings.Compare(a.ID, b.ID))
 }
 
 func (n Note) clone() Note {

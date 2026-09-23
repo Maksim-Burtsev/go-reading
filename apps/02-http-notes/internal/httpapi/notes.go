@@ -3,6 +3,7 @@ package httpapi
 import (
 	"fmt"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/Maksim-Burtsev/go-reading/apps/02-http-notes/internal/notes"
@@ -64,14 +65,39 @@ func (a *api) createNote(w http.ResponseWriter, r *http.Request) error {
 }
 
 func (a *api) listNotes(w http.ResponseWriter, r *http.Request) error {
-	all := a.store.List()
+	q := r.URL.Query()
+	limit, err := parseLimit(q.Get("limit"))
+	if err != nil {
+		return err
+	}
 
-	resp := listNotesResponse{Notes: make([]noteResponse, 0, len(all))}
-	for _, n := range all {
+	var found []notes.Note
+	if tag := q.Get("tag"); tag != "" {
+		found = a.store.ListByTag(tag, limit)
+	} else {
+		found = a.store.List()
+		if limit > 0 {
+			found = found[:min(limit, len(found))]
+		}
+	}
+
+	var resp listNotesResponse
+	for _, n := range found {
 		resp.Notes = append(resp.Notes, newNoteResponse(n))
 	}
 	a.writeJSON(w, r, http.StatusOK, resp)
 	return nil
+}
+
+func parseLimit(v string) (int, error) {
+	if v == "" {
+		return 0, nil
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 1 {
+		return 0, badRequest("invalid_query", "limit must be a positive integer")
+	}
+	return n, nil
 }
 
 func (a *api) getNote(w http.ResponseWriter, r *http.Request) error {

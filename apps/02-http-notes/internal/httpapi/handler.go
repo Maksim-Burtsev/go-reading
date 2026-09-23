@@ -17,6 +17,7 @@ type noteStore interface {
 	Create(in notes.Input) notes.Note
 	Get(id string) (notes.Note, error)
 	List() []notes.Note
+	ListByTag(tag string, limit int) []notes.Note
 	Update(id string, in notes.Input) (notes.Note, error)
 	Delete(id string) error
 }

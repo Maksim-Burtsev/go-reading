@@ -125,6 +125,32 @@ func TestStoreListOrdersByCreation(t *testing.T) {
 	require.Equal(t, want, got)
 }
 
+func TestStoreListByTag(t *testing.T) {
+	t.Parallel()
+
+	s := newTestStore()
+	a := s.Create(Input{Title: "a", Tags: []string{"home"}})
+	b := s.Create(Input{Title: "b", Tags: []string{"home", "work"}})
+	c := s.Create(Input{Title: "c", Tags: []string{"work"}})
+
+	ids := func(ns []Note) []string {
+		out := make([]string, 0, len(ns))
+		for _, n := range ns {
+			out = append(out, n.ID)
+		}
+		return out
+	}
+
+	require.Equal(t, []string{a.ID, b.ID}, ids(s.ListByTag("home", 0)))
+	require.Equal(t, []string{b.ID, c.ID}, ids(s.ListByTag("work", 0)))
+	require.Empty(t, s.ListByTag("missing", 0))
+	require.Len(t, s.ListByTag("work", 1), 1)
+
+	require.NoError(t, s.Delete(b.ID))
+	require.Equal(t, []string{a.ID}, ids(s.ListByTag("home", 0)))
+	require.Equal(t, []string{c.ID}, ids(s.ListByTag("work", 0)))
+}
+
 func TestStoreDoesNotShareTags(t *testing.T) {
 	t.Parallel()
 

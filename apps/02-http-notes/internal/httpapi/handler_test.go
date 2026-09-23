@@ -332,12 +332,60 @@ func TestListNotes(t *testing.T) {
 
 			require.Equal(t, http.StatusOK, rec.Code)
 			resp := decodeBody[listNotesResponse](t, rec)
-			require.NotNil(t, resp.Notes)
+			require.Len(t, resp.Notes, len(tt.titles))
 			got := make([]string, 0, len(resp.Notes))
 			for _, n := range resp.Notes {
 				got = append(got, n.Title)
 			}
 			require.ElementsMatch(t, tt.titles, got)
+		})
+	}
+}
+
+func TestListNotesQuery(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		query      string
+		wantStatus int
+		wantTitles []string
+		wantLen    int
+	}{
+		{name: "by tag", query: "?tag=home", wantStatus: http.StatusOK, wantTitles: []string{"groceries", "rent"}},
+		{name: "unknown tag", query: "?tag=garden", wantStatus: http.StatusOK, wantTitles: []string{}},
+		{name: "limit", query: "?limit=2", wantStatus: http.StatusOK, wantLen: 2},
+		{name: "tag with limit", query: "?tag=home&limit=1", wantStatus: http.StatusOK, wantLen: 1},
+		{name: "zero limit", query: "?limit=0", wantStatus: http.StatusBadRequest},
+		{name: "invalid limit", query: "?limit=ten", wantStatus: http.StatusBadRequest},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			h, store := newTestHandler()
+			store.Create(notes.Input{Title: "groceries", Tags: []string{"home"}})
+			store.Create(notes.Input{Title: "standup", Tags: []string{"work"}})
+			store.Create(notes.Input{Title: "rent", Tags: []string{"home", "money"}})
+
+			rec := serve(t, h, http.MethodGet, "/notes"+tt.query, "")
+
+			require.Equal(t, tt.wantStatus, rec.Code, rec.Body.String())
+			if tt.wantStatus != http.StatusOK {
+				require.Equal(t, "invalid_query", decodeBody[errorResponse](t, rec).Error.Code)
+				return
+			}
+			resp := decodeBody[listNotesResponse](t, rec)
+			if tt.wantTitles == nil {
+				require.Len(t, resp.Notes, tt.wantLen)
+				return
+			}
+			got := make([]string, 0, len(resp.Notes))
+			for _, n := range resp.Notes {
+				got = append(got, n.Title)
+			}
+			require.ElementsMatch(t, tt.wantTitles, got)
 		})
 	}
 }
