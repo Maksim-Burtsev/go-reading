@@ -94,12 +94,23 @@ type Options struct {
 	// Jobs is the maximum number of inputs read at the same time. Values
 	// below 1 mean runtime.GOMAXPROCS(0).
 	Jobs int
+	// KeepGoing skips inputs that cannot be opened or read instead of
+	// failing the whole count.
+	KeepGoing bool
+}
+
+// Skipped is an input that CountAll left out because it could not be opened
+// or read.
+type Skipped struct {
+	Name string
+	Err  error
 }
 
 // CountAll counts the words of every named input, reading up to opts.Jobs
 // inputs concurrently. The first failure cancels the remaining reads and is
-// returned.
-func CountAll(ctx context.Context, open Opener, names []string, opts Options) (Counts, error) {
+// returned, unless opts.KeepGoing is set: then the inputs that fail are left
+// out of the counts and returned as skipped, sorted by name.
+func CountAll(ctx context.Context, open Opener, names []string, opts Options) (Counts, []Skipped, error) {
 	jobs := opts.Jobs
 	if jobs < 1 {
 		jobs = runtime.GOMAXPROCS(0)
@@ -109,11 +120,16 @@ func CountAll(ctx context.Context, open Opener, names []string, opts Options) (C
 
 	var mu sync.Mutex
 	total := make(Counts)
+	var skipped []Skipped
 	for _, name := range names {
 		g.Go(func() error {
 			counts, err := countInput(ctx, open, name, opts.MinLen)
 			if err != nil {
-				return err
+				if !opts.KeepGoing {
+					return err
+				}
+				skipped = append(skipped, Skipped{Name: name, Err: err})
+				return nil
 			}
 			mu.Lock()
 			defer mu.Unlock()
@@ -122,9 +138,12 @@ func CountAll(ctx context.Context, open Opener, names []string, opts Options) (C
 		})
 	}
 	if err := g.Wait(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return total, nil
+	slices.SortFunc(skipped, func(a, b Skipped) int {
+		return strings.Compare(a.Name, b.Name)
+	})
+	return total, skipped, nil
 }
 
 func countInput(ctx context.Context, open Opener, name string, minLen int) (_ Counts, err error) {

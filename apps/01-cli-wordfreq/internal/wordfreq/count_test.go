@@ -108,11 +108,12 @@ func TestCountAll(t *testing.T) {
 	}
 	merged := Counts{"the": 3, "cat": 2, "and": 1, "hat": 1, "sat": 1}
 	tests := []struct {
-		name    string
-		names   []string
-		opts    Options
-		want    Counts
-		wantErr error
+		name        string
+		names       []string
+		opts        Options
+		want        Counts
+		wantSkipped []string
+		wantErr     error
 	}{
 		{name: "single input", names: []string{"b"}, opts: Options{MinLen: 1, Jobs: 1}, want: Counts{"the": 1, "cat": 1, "sat": 1}},
 		{name: "sequential", names: []string{"a", "b", "c"}, opts: Options{MinLen: 1, Jobs: 1}, want: merged},
@@ -121,17 +122,36 @@ func TestCountAll(t *testing.T) {
 		{name: "zero options", names: []string{"a", "b", "c"}, opts: Options{}, want: merged},
 		{name: "missing input", names: []string{"a", "missing"}, opts: Options{MinLen: 1, Jobs: 2}, wantErr: fs.ErrNotExist},
 		{name: "read error", names: []string{"a", brokenInput}, opts: Options{MinLen: 1, Jobs: 2}, wantErr: errBroken},
+		{
+			name:        "keep going past missing input",
+			names:       []string{"a", "missing", "b", "c"},
+			opts:        Options{MinLen: 1, Jobs: 4, KeepGoing: true},
+			want:        merged,
+			wantSkipped: []string{"missing"},
+		},
+		{
+			name:        "keep going past read error",
+			names:       []string{brokenInput, "b"},
+			opts:        Options{MinLen: 1, Jobs: 2, KeepGoing: true},
+			want:        Counts{"the": 1, "cat": 1, "sat": 1},
+			wantSkipped: []string{brokenInput},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got, err := CountAll(t.Context(), open, tt.names, tt.opts)
+			got, skipped, err := CountAll(t.Context(), open, tt.names, tt.opts)
 			if tt.wantErr != nil {
 				require.ErrorIs(t, err, tt.wantErr)
 				return
 			}
 			require.NoError(t, err)
 			require.Equal(t, tt.want, got)
+			var gotSkipped []string
+			for _, s := range skipped {
+				gotSkipped = append(gotSkipped, s.Name)
+			}
+			require.Equal(t, tt.wantSkipped, gotSkipped)
 		})
 	}
 }

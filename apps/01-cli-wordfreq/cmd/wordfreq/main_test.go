@@ -28,6 +28,7 @@ func TestRun(t *testing.T) {
 	b := writeFile(t, "b.txt", "The Cat sat\n")
 	lines1 := writeFile(t, "lines1.txt", "x\ny\nx\n")
 	lines2 := writeFile(t, "lines2.txt", "y\nz\n")
+	missing := filepath.Join(t.TempDir(), "missing.txt")
 
 	tests := []struct {
 		name       string
@@ -90,8 +91,24 @@ func TestRun(t *testing.T) {
 		},
 		{
 			name:    "missing file",
-			args:    []string{"count", a, filepath.Join(t.TempDir(), "missing.txt")},
+			args:    []string{"count", a, missing},
 			wantErr: fs.ErrNotExist,
+		},
+		{
+			name: "keep going past missing file",
+			args: []string{"count", "--keep-going", a, missing},
+			wantOut: "RANK  WORD  COUNT  SHARE\n" +
+				"1     the   2      40.00%\n" +
+				"2     and   1      20.00%\n" +
+				"3     cat   1      20.00%\n" +
+				"4     hat   1      20.00%\n",
+			wantStderr: `"msg":"input skipped"`,
+		},
+		{
+			name:       "keep going reports skipped inputs in json",
+			args:       []string{"count", "-k", "--json", "--top", "1", missing, b},
+			wantJSON:   `{"total":3,"unique":3,"words":[{"word":"cat","count":1}],"skipped":["` + missing + `"]}`,
+			wantStderr: `"input":"` + missing + `"`,
 		},
 		{
 			name:    "stdin twice",

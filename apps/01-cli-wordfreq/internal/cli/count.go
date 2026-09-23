@@ -16,17 +16,19 @@ import (
 )
 
 type countCommand struct {
-	root   *rootCommand
-	top    int
-	minLen int
-	jobs   int
-	json   bool
+	root      *rootCommand
+	top       int
+	minLen    int
+	jobs      int
+	json      bool
+	keepGoing bool
 }
 
 type report struct {
-	Total  int              `json:"total"`
-	Unique int              `json:"unique"`
-	Words  []wordfreq.Entry `json:"words"`
+	Total   int              `json:"total"`
+	Unique  int              `json:"unique"`
+	Words   []wordfreq.Entry `json:"words"`
+	Skipped []string         `json:"skipped,omitempty"`
 }
 
 func newCountCommand(root *rootCommand) *cobra.Command {
@@ -38,9 +40,14 @@ func newCountCommand(root *rootCommand) *cobra.Command {
 
 Words are runs of Unicode letters and digits, compared case-insensitively.
 Inputs are read concurrently; the output order is always count descending,
-then word ascending.`,
+then word ascending.
+
+By default the first input that cannot be opened or read stops the command.
+With --keep-going such inputs are skipped with a warning and the rest are
+still counted.`,
 		Example: `  wordfreq count --top 20 book.txt
-  cat *.md | wordfreq count --min-len 4 --json`,
+  cat *.md | wordfreq count --min-len 4 --json
+  wordfreq count --keep-going --top 50 notes/*.txt`,
 		RunE: c.run,
 	}
 	f := cmd.Flags()
@@ -48,6 +55,7 @@ then word ascending.`,
 	f.IntVar(&c.minLen, "min-len", 1, "skip words shorter than this many letters")
 	f.IntVarP(&c.jobs, "jobs", "j", runtime.GOMAXPROCS(0), "maximum number of inputs read concurrently")
 	f.BoolVar(&c.json, "json", false, "print JSON instead of a table")
+	f.BoolVarP(&c.keepGoing, "keep-going", "k", false, "skip inputs that cannot be opened or read instead of failing")
 	return cmd
 }
 
@@ -75,13 +83,19 @@ func (c *countCommand) run(cmd *cobra.Command, args []string) error {
 	ctx := cmd.Context()
 	start := time.Now()
 	open := input.Opener{Stdin: cmd.InOrStdin()}
-	counts, err := wordfreq.CountAll(ctx, open, names, wordfreq.Options{MinLen: c.minLen, Jobs: c.jobs})
+	opts := wordfreq.Options{MinLen: c.minLen, Jobs: c.jobs, KeepGoing: c.keepGoing}
+	counts, skipped, err := wordfreq.CountAll(ctx, open, names, opts)
 	if err != nil {
 		return fmt.Errorf("count: %w", err)
 	}
 	rep := report{Total: counts.Total(), Unique: len(counts), Words: counts.Top(c.top)}
+	for _, s := range skipped {
+		c.root.logger.WarnContext(ctx, "input skipped", slog.String("input", s.Name), slog.Any("error", s.Err))
+		rep.Skipped = append(rep.Skipped, s.Name)
+	}
 	c.root.logger.InfoContext(ctx, "count finished",
 		slog.Int("inputs", len(names)),
+		slog.Int("skipped", len(skipped)),
 		slog.Int("words", rep.Total),
 		slog.Int("unique", rep.Unique),
 		slog.Duration("elapsed", time.Since(start)),
