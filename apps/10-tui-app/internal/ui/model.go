@@ -114,7 +114,8 @@ func (m Model) updateBrowse(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 		return m, tea.Quit
 	case key.Matches(msg, m.keys.Filter):
 		m.focus = focusFilter
-		return m, m.filter.Focus()
+		cmd := m.filter.Focus()
+		return m, cmd
 	case key.Matches(msg, m.keys.Toggle):
 		m.toggleDone()
 	case key.Matches(msg, m.keys.Switch):

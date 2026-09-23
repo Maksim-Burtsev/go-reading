@@ -412,3 +412,27 @@ func TestViewBeforeWindowSize(t *testing.T) {
 
 	require.Empty(t, New(sampleTasks(), testNow).View().Content)
 }
+
+func TestViewShortTerminal(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		height int
+	}{
+		{name: "one row", height: 1},
+		{name: "two rows", height: 2},
+		{name: "three rows", height: 3},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			m, _ := send(New(sampleTasks(), testNow), tea.WindowSizeMsg{Width: 80, Height: tt.height}, press("j"))
+			var v tea.View
+			require.NotPanics(t, func() { v = m.View() })
+			require.Contains(t, ansi.Strip(v.Content), "Tasks")
+		})
+	}
+}

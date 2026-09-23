@@ -30,7 +30,7 @@ func (m Model) View() tea.View {
 	frameX, frameY := listPane.GetFrameSize()
 	body := lipgloss.JoinHorizontal(lipgloss.Top,
 		listPane.Width(listWidth).Height(m.bodyHeight()).
-			Render(m.listView(listWidth-frameX, m.bodyHeight()-frameY)),
+			Render(m.listView(listWidth-frameX, max(m.bodyHeight()-frameY, 0))),
 		detailsPane.Width(detailsWidth).Height(m.bodyHeight()).
 			Render(m.details.View()),
 	)

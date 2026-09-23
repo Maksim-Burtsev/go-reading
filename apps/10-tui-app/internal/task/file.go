@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,10 +15,9 @@ import (
 
 // Errors returned by Load.
 var (
-	ErrMalformed    = errors.New("malformed task file")
-	ErrInvalidTask  = errors.New("invalid task")
-	ErrDuplicateID  = errors.New("duplicate task id")
-	errTrailingData = errors.New("unexpected data after the top-level object")
+	ErrMalformed   = errors.New("malformed task file")
+	ErrInvalidTask = errors.New("invalid task")
+	ErrDuplicateID = errors.New("duplicate task id")
 )
 
 type document struct {
@@ -30,7 +30,7 @@ func Load(ctx context.Context, path string) ([]Task, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	data, err := os.ReadFile(filepath.Clean(path))
+	data, err := os.ReadFile(path) //nolint:gosec // G304: reading the task file the user names is the point
 	if err != nil {
 		return nil, fmt.Errorf("read task file: %w", err)
 	}
@@ -42,7 +42,7 @@ func Load(ctx context.Context, path string) ([]Task, error) {
 		return nil, fmt.Errorf("%w: %w", ErrMalformed, err)
 	}
 	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
-		return nil, fmt.Errorf("%w: %w", ErrMalformed, errTrailingData)
+		return nil, fmt.Errorf("%w: unexpected data after the top-level object", ErrMalformed)
 	}
 
 	if err := validate(doc.Tasks); err != nil {
@@ -78,7 +78,9 @@ func validate(tasks []Task) error {
 	return errors.Join(errs...)
 }
 
-// Save atomically replaces the task file at path with tasks.
+// Save atomically replaces the task file at path with tasks. A symlink at
+// path is followed: the file it points to is replaced and the link stays.
+// The new file keeps the permission bits of the one it replaces.
 func Save(ctx context.Context, path string, tasks []Task) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -87,22 +89,52 @@ func Save(ctx context.Context, path string, tasks []Task) error {
 	if err != nil {
 		return fmt.Errorf("encode tasks: %w", err)
 	}
+	target, perm, err := replaceTarget(path)
+	if err != nil {
+		return err
+	}
 
-	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".*")
+	tmp, err := os.CreateTemp(filepath.Dir(target), "."+filepath.Base(target)+".*")
 	if err != nil {
 		return fmt.Errorf("create temp file: %w", err)
 	}
 	defer func() { _ = os.Remove(tmp.Name()) }()
 
+	if err := tmp.Chmod(perm); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("chmod %s: %w", tmp.Name(), err)
+	}
 	if _, err := tmp.Write(append(data, '\n')); err != nil {
 		_ = tmp.Close()
 		return fmt.Errorf("write %s: %w", tmp.Name(), err)
 	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("sync %s: %w", tmp.Name(), err)
+	}
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("close %s: %w", tmp.Name(), err)
 	}
-	if err := os.Rename(tmp.Name(), path); err != nil {
-		return fmt.Errorf("replace %s: %w", path, err)
+	if err := os.Rename(tmp.Name(), target); err != nil {
+		return fmt.Errorf("replace %s: %w", target, err)
 	}
 	return nil
+}
+
+// replaceTarget returns the file Save replaces, path itself or the file a
+// symlink at path points to, and the permission bits for its replacement:
+// the current file's, or 0600 for a file that does not exist yet.
+func replaceTarget(path string) (string, fs.FileMode, error) {
+	target, err := filepath.EvalSymlinks(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return path, 0o600, nil
+	}
+	if err != nil {
+		return "", 0, fmt.Errorf("resolve %s: %w", path, err)
+	}
+	info, err := os.Stat(target)
+	if err != nil {
+		return "", 0, fmt.Errorf("stat %s: %w", target, err)
+	}
+	return target, info.Mode().Perm(), nil
 }

@@ -100,7 +100,7 @@ func TestSaveRoundTrip(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, tasks, got)
 
-	raw, err := os.ReadFile(filepath.Clean(path))
+	raw, err := os.ReadFile(path) //nolint:gosec // G304: the test reads back the file it wrote
 	require.NoError(t, err)
 	require.Contains(t, string(raw), `"due": "2026-09-30"`)
 	require.Equal(t, 1, strings.Count(string(raw), `"due"`))
@@ -108,4 +108,42 @@ func TestSaveRoundTrip(t *testing.T) {
 	entries, err := os.ReadDir(dir)
 	require.NoError(t, err)
 	require.Len(t, entries, 1)
+}
+
+func TestSaveKeepsPermissions(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "tasks.json")
+	require.NoError(t, os.WriteFile(path, []byte(`{"tasks": []}`), 0o600))
+	require.NoError(t, os.Chmod(path, 0o640)) //nolint:gosec // G302: a group-readable file is the case under test
+
+	require.NoError(t, Save(t.Context(), path, nil))
+
+	info, err := os.Stat(path)
+	require.NoError(t, err)
+	require.Equal(t, fs.FileMode(0o640), info.Mode().Perm())
+}
+
+func TestSaveFollowsSymlink(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	target := filepath.Join(dir, "real.json")
+	link := filepath.Join(dir, "tasks.json")
+	require.NoError(t, os.WriteFile(target, []byte(`{"tasks": []}`), 0o600))
+	require.NoError(t, os.Symlink("real.json", link))
+
+	tasks := []Task{{ID: "API-1", Title: "Linked", Status: StatusTodo, Priority: PriorityLow}}
+	require.NoError(t, Save(t.Context(), link, tasks))
+
+	info, err := os.Lstat(link)
+	require.NoError(t, err)
+	require.NotZero(t, info.Mode()&fs.ModeSymlink, "the link was replaced by a regular file")
+	got, err := Load(t.Context(), target)
+	require.NoError(t, err)
+	require.Equal(t, tasks, got)
+
+	entries, err := os.ReadDir(dir)
+	require.NoError(t, err)
+	require.Len(t, entries, 2)
 }
