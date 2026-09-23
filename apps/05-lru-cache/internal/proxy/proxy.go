@@ -93,6 +93,8 @@ func (p *Proxy) handleGet(w http.ResponseWriter, r *http.Request) {
 	resp.serve(w, hit)
 }
 
+// handlePurge drops the cached response for the request's path and query. A fetch for the same
+// key that is already in flight is not affected: it still stores its response when it completes.
 func (p *Proxy) handlePurge(w http.ResponseWriter, r *http.Request) {
 	if !p.cache.Remove(requestKey(r.URL)) {
 		http.Error(w, "not cached", http.StatusNotFound)
@@ -131,8 +133,10 @@ func (p *Proxy) load(ctx context.Context, key string) (*Response, error) {
 		if resp, ok := p.cache.Peek(key); ok {
 			return resp, nil
 		}
-		resp, err := p.fetch(context.WithoutCancel(ctx), key)
+		fetchCtx := context.WithoutCancel(ctx)
+		resp, err := p.fetch(fetchCtx, key)
 		if err != nil {
+			p.logger.ErrorContext(fetchCtx, "upstream fetch failed", "key", key, "error", err)
 			return nil, err
 		}
 		if resp.status == http.StatusOK {
@@ -191,7 +195,7 @@ func (p *Proxy) writeError(w http.ResponseWriter, r *http.Request, key string, e
 	if ne, ok := errors.AsType[net.Error](err); ok && ne.Timeout() {
 		status = http.StatusGatewayTimeout
 	}
-	p.logger.ErrorContext(r.Context(), "upstream fetch failed", "key", key, "status", status, "error", err)
+	p.logger.InfoContext(r.Context(), "upstream error sent to client", "key", key, "status", status, "error", err)
 	http.Error(w, http.StatusText(status), status)
 }
 

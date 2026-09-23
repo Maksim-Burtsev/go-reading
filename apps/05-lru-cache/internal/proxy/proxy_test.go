@@ -1,7 +1,9 @@
 package proxy_test
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
@@ -224,6 +226,100 @@ func TestUpstreamErrors(t *testing.T) {
 	}
 }
 
+type logBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *logBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *logBuffer) entries(t *testing.T) []string {
+	t.Helper()
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	var entries []string
+	for line := range strings.Lines(b.buf.String()) {
+		var e struct {
+			Level string `json:"level"`
+			Msg   string `json:"msg"`
+		}
+		require.NoError(t, json.Unmarshal([]byte(line), &e))
+		entries = append(entries, e.Level+" "+e.Msg)
+	}
+	return entries
+}
+
+func TestUpstreamFailureIsLoggedOnce(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		waiters    int
+		leaveAfter time.Duration
+		want       []string
+	}{
+		{
+			name:    "every waiter is answered",
+			waiters: 3,
+			want: []string{
+				"ERROR upstream fetch failed",
+				"INFO upstream error sent to client",
+				"INFO upstream error sent to client",
+				"INFO upstream error sent to client",
+			},
+		},
+		{
+			name:       "the only client left first",
+			waiters:    1,
+			leaveAfter: 5 * time.Second,
+			want: []string{
+				"INFO client left before upstream answered",
+				"ERROR upstream fetch failed",
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			synctest.Test(t, func(t *testing.T) {
+				var logs logBuffer
+				hang := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+					<-r.Context().Done()
+					return nil, r.Context().Err()
+				})
+				u, err := url.Parse("http://upstream.test")
+				require.NoError(t, err)
+				cache, err := lru.New[string, *proxy.Response](16)
+				require.NoError(t, err)
+				client := &http.Client{Transport: hang, Timeout: 10 * time.Second}
+				p, err := proxy.New(u, client, cache, 1024, slog.New(slog.NewJSONHandler(&logs, nil)))
+				require.NoError(t, err)
+				h := p.Handler()
+
+				var wg sync.WaitGroup
+				for range tt.waiters {
+					wg.Go(func() {
+						ctx, cancel := context.WithCancel(t.Context())
+						defer cancel()
+						if tt.leaveAfter > 0 {
+							time.AfterFunc(tt.leaveAfter, cancel)
+						}
+						h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequestWithContext(ctx, http.MethodGet, "/x", nil))
+					})
+				}
+				wg.Wait()
+				time.Sleep(time.Minute)
+				synctest.Wait()
+
+				require.ElementsMatch(t, tt.want, logs.entries(t))
+			})
+		})
+	}
+}
+
 func blockingTransport(release <-chan struct{}, calls *atomic.Int32) roundTripFunc {
 	return func(r *http.Request) (*http.Response, error) {
 		calls.Add(1)
@@ -292,5 +388,28 @@ func TestFetchOutlivesCanceledRequest(t *testing.T) {
 		require.True(t, ok)
 		require.Equal(t, "HIT", serve(t, h, http.MethodGet, "/slow").Header().Get("X-Cache"))
 		require.Equal(t, int32(1), calls.Load())
+	})
+}
+
+func TestPurgeDoesNotAffectFetchInFlight(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		release := make(chan struct{})
+		var calls atomic.Int32
+		client := &http.Client{Transport: blockingTransport(release, &calls), Timeout: time.Minute}
+		h, cache := newProxy(t, "http://upstream.test", client, 1024)
+
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			serve(t, h, http.MethodGet, "/slow")
+		}()
+		synctest.Wait()
+		require.Equal(t, http.StatusNotFound, serve(t, h, "PURGE", "/slow").Code)
+
+		close(release)
+		<-done
+		_, ok := cache.Peek("/slow")
+		require.True(t, ok)
 	})
 }
