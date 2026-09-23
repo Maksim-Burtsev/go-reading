@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -25,22 +26,45 @@ type Limiter interface {
 // KeyFunc returns the key a request is rate limited by.
 type KeyFunc func(r *http.Request) (string, error)
 
+// MiddlewareOption configures Middleware.
+type MiddlewareOption func(*limitHandler)
+
+// WithMaxWait lets a request over the limit wait for up to d in total for the limiter to admit
+// it, instead of being rejected at once. The default, zero, never waits.
+func WithMaxWait(d time.Duration) MiddlewareOption {
+	return func(h *limitHandler) { h.maxWait = d }
+}
+
+// WithMaxWaiters caps how many requests may wait at the same time. Requests over the cap are
+// rejected at once. The default, zero, means no cap.
+func WithMaxWaiters(n int) MiddlewareOption {
+	return func(h *limitHandler) { h.maxWaiters = int64(n) }
+}
+
 // Middleware returns an HTTP middleware that rate limits requests by the key from keyFunc and
 // sets the X-RateLimit-Limit, X-RateLimit-Remaining and X-RateLimit-Reset headers, in seconds.
 // Rejected requests get 429 with Retry-After and a JSON body; key and limiter failures get 400
 // and 503. A limiter error on a request whose context has ended is not a limiter failure: nothing
-// is logged or written for it.
-func Middleware(l Limiter, keyFunc KeyFunc, logger *slog.Logger) func(http.Handler) http.Handler {
+// is logged or written for it. With WithMaxWait, a request over the limit is delayed until it is
+// admitted or the wait would exceed the maximum.
+func Middleware(l Limiter, keyFunc KeyFunc, logger *slog.Logger, opts ...MiddlewareOption) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
-		return &limitHandler{limiter: l, keyFunc: keyFunc, logger: logger, next: next}
+		h := &limitHandler{limiter: l, keyFunc: keyFunc, logger: logger, next: next}
+		for _, opt := range opts {
+			opt(h)
+		}
+		return h
 	}
 }
 
 type limitHandler struct {
-	limiter Limiter
-	keyFunc KeyFunc
-	logger  *slog.Logger
-	next    http.Handler
+	limiter    Limiter
+	keyFunc    KeyFunc
+	logger     *slog.Logger
+	next       http.Handler
+	maxWait    time.Duration
+	maxWaiters int64
+	waiting    atomic.Int64
 }
 
 type errorResponse struct {
@@ -59,6 +83,12 @@ func (h *limitHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	d, err := h.limiter.Allow(ctx, key)
+	if err == nil && !d.Allowed && h.maxWait > 0 {
+		d, err := h.wait(ctx, key, d)
+		if err == nil && d.Allowed {
+			h.logger.DebugContext(ctx, "request delayed", slog.String("key", key))
+		}
+	}
 	if err != nil {
 		if ctx.Err() != nil {
 			return
@@ -79,6 +109,29 @@ func (h *limitHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.next.ServeHTTP(w, r)
+}
+
+// wait retries Allow after each RetryAfter until the request is admitted, its context ends, or
+// waiting longer would exceed maxWait in total.
+func (h *limitHandler) wait(ctx context.Context, key string, d Decision) (Decision, error) {
+	if h.maxWaiters > 0 && h.waiting.Load() >= h.maxWaiters {
+		return d, nil
+	}
+	h.waiting.Add(1)
+	defer h.waiting.Add(-1)
+
+	for !d.Allowed && d.RetryAfter <= h.maxWait {
+		select {
+		case <-ctx.Done():
+			return d, fmt.Errorf("wait for rate limit: %w", ctx.Err())
+		case <-time.After(d.RetryAfter):
+		}
+		var err error
+		if d, err = h.limiter.Allow(ctx, key); err != nil {
+			return d, err
+		}
+	}
+	return d, nil
 }
 
 func (h *limitHandler) writeError(ctx context.Context, w http.ResponseWriter, status int, body errorResponse) {

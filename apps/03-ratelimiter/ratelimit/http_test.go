@@ -9,7 +9,11 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"strconv"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/require"
@@ -232,4 +236,120 @@ func TestForwardedFor(t *testing.T) {
 			require.Equal(t, tt.want, got)
 		})
 	}
+}
+
+func rejectThenAllow(retryAfter time.Duration, rejections int32) (Limiter, *atomic.Int32) {
+	var calls atomic.Int32
+	l := limiterFunc(func(context.Context, string) (Decision, error) {
+		if calls.Add(1) <= rejections {
+			return Decision{Limit: 1, RetryAfter: retryAfter}, nil
+		}
+		return Decision{Allowed: true, Limit: 1}, nil
+	})
+	return l, &calls
+}
+
+func TestMiddlewareDelaysRequestUntilAllowed(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		l, calls := rejectThenAllow(50*time.Millisecond, 1)
+		h := Middleware(l, RemoteIP, slog.New(slog.DiscardHandler), WithMaxWait(time.Second))(http.HandlerFunc(writeOK))
+
+		start := time.Now()
+		h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/", nil))
+
+		require.Equal(t, int32(2), calls.Load())
+		require.Equal(t, 50*time.Millisecond, time.Since(start))
+	})
+}
+
+func TestMiddlewareRejectsWhenWaitIsTooLong(t *testing.T) {
+	t.Parallel()
+	l, calls := rejectThenAllow(time.Second, 1)
+	h := Middleware(l, RemoteIP, slog.New(slog.DiscardHandler), WithMaxWait(200*time.Millisecond))(http.HandlerFunc(writeOK))
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/", nil))
+
+	require.Equal(t, http.StatusTooManyRequests, rec.Code)
+	require.Equal(t, int32(1), calls.Load())
+}
+
+func TestMiddlewareCapsWaiters(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		var calls atomic.Int32
+		l := limiterFunc(func(context.Context, string) (Decision, error) {
+			calls.Add(1)
+			return Decision{Limit: 1, RetryAfter: time.Minute}, nil
+		})
+		h := Middleware(l, RemoteIP, slog.New(slog.DiscardHandler),
+			WithMaxWait(time.Hour), WithMaxWaiters(1))(http.HandlerFunc(writeOK))
+
+		ctx, cancel := context.WithCancel(t.Context())
+		parked := make(chan struct{})
+		go func() {
+			defer close(parked)
+			h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequestWithContext(ctx, http.MethodGet, "/", nil))
+		}()
+		synctest.Wait()
+
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/", nil))
+		require.Equal(t, http.StatusTooManyRequests, rec.Code)
+		require.Equal(t, int32(2), calls.Load())
+
+		cancel()
+		<-parked
+	})
+}
+
+func TestMiddlewareStopsWaitingWhenClientLeaves(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		l, _ := rejectThenAllow(time.Minute, 1)
+		h := Middleware(l, RemoteIP, slog.New(slog.DiscardHandler), WithMaxWait(time.Hour))(http.HandlerFunc(writeOK))
+
+		ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+		defer cancel()
+		rec := httptest.NewRecorder()
+		start := time.Now()
+		h.ServeHTTP(rec, httptest.NewRequestWithContext(ctx, http.MethodGet, "/", nil))
+
+		require.Equal(t, time.Second, time.Since(start))
+		require.NotEqual(t, "ok", rec.Body.String())
+	})
+}
+
+func TestMiddlewareDelaysKeysIndependently(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		var mu sync.Mutex
+		seen := make(map[string]int)
+		l := limiterFunc(func(_ context.Context, key string) (Decision, error) {
+			mu.Lock()
+			defer mu.Unlock()
+			seen[key]++
+			if seen[key] == 1 {
+				return Decision{Limit: 1, RetryAfter: 10 * time.Millisecond}, nil
+			}
+			return Decision{Allowed: true, Limit: 1}, nil
+		})
+		keyByHeader := func(r *http.Request) (string, error) { return r.Header.Get("X-Client"), nil }
+		h := Middleware(l, keyByHeader, slog.New(slog.DiscardHandler), WithMaxWait(time.Second))(http.HandlerFunc(writeOK))
+
+		start := time.Now()
+		var wg sync.WaitGroup
+		for i := range 3 {
+			wg.Go(func() {
+				req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/", nil)
+				req.Header.Set("X-Client", "client-"+strconv.Itoa(i))
+				h.ServeHTTP(httptest.NewRecorder(), req)
+			})
+		}
+		wg.Wait()
+
+		require.Equal(t, 10*time.Millisecond, time.Since(start))
+		require.Equal(t, map[string]int{"client-0": 2, "client-1": 2, "client-2": 2}, seen)
+	})
 }

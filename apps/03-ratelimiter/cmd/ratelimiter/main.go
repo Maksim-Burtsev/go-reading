@@ -52,8 +52,12 @@ func run(ctx context.Context, args []string, getenv func(string) string, stdout,
 		keyFunc = ratelimit.ForwardedFor(cfg.TrustedProxies)
 	}
 
+	limit := ratelimit.Middleware(limiter, keyFunc, logger,
+		ratelimit.WithMaxWait(cfg.MaxWait),
+		ratelimit.WithMaxWaiters(cfg.MaxWaiters),
+	)
 	srv := &http.Server{
-		Handler:           server.New(logger, ratelimit.Middleware(limiter, keyFunc, logger)),
+		Handler:           server.New(logger, limit),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
 		WriteTimeout:      10 * time.Second,

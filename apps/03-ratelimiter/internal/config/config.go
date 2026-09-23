@@ -45,6 +45,11 @@ type Config struct {
 	// Burst is the bucket capacity of the token bucket. The sliding window ignores it.
 	Burst           int           `env:"BURST" envDefault:"10"`
 	CleanupInterval time.Duration `env:"CLEANUP_INTERVAL" envDefault:"1m"`
+	// MaxWait is how long a request over the limit may be delayed before it is rejected.
+	// Zero rejects at once.
+	MaxWait time.Duration `env:"MAX_WAIT" envDefault:"0s"`
+	// MaxWaiters caps the number of requests delayed at the same time.
+	MaxWaiters int `env:"MAX_WAITERS" envDefault:"100"`
 	// TrustedProxies are the comma-separated prefixes of reverse proxies whose
 	// X-Forwarded-For header is trusted. When empty, clients are keyed by their peer address.
 	TrustedProxies  []netip.Prefix `env:"TRUSTED_PROXIES"`
