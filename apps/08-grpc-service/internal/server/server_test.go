@@ -16,6 +16,7 @@ import (
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
+	"google.golang.org/protobuf/proto"
 
 	inventoryv1 "github.com/Maksim-Burtsev/go-reading/apps/08-grpc-service/gen/inventory/v1"
 	"github.com/Maksim-Burtsev/go-reading/apps/08-grpc-service/internal/inventory"
@@ -126,9 +127,7 @@ func TestGetItem(t *testing.T) {
 			if tt.wantCode != codes.OK {
 				return
 			}
-			require.Equal(t, tt.want.GetSku(), resp.GetItem().GetSku())
-			require.Equal(t, tt.want.GetName(), resp.GetItem().GetName())
-			require.Equal(t, tt.want.GetAvailable(), resp.GetItem().GetAvailable())
+			require.True(t, proto.Equal(tt.want, resp.GetItem()), "got %v", resp.GetItem())
 		})
 	}
 }
@@ -326,6 +325,14 @@ func TestPanicIsRecovered(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.Equal(t, healthpb.HealthCheckResponse_SERVING, health.GetStatus())
+}
+
+func TestServeAfterShutdownReturnsNil(t *testing.T) {
+	t.Parallel()
+	srv := server.New(slog.New(slog.NewJSONHandler(io.Discard, nil)), newStore(t), time.Second)
+
+	require.NoError(t, srv.Shutdown(t.Context()))
+	require.NoError(t, srv.Serve(bufconn.Listen(1<<20)))
 }
 
 func TestShutdownCancelsCallsAfterTimeout(t *testing.T) {

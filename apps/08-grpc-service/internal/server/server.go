@@ -6,6 +6,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -58,9 +59,9 @@ func New(logger *slog.Logger, inv Inventory, defaultTimeout time.Duration) *Serv
 }
 
 // Serve accepts connections on lis until the server is shut down.
-// It returns nil after Shutdown.
+// It returns nil after Shutdown, even when Shutdown ran before Serve.
 func (s *Server) Serve(lis net.Listener) error {
-	if err := s.grpc.Serve(lis); err != nil {
+	if err := s.grpc.Serve(lis); err != nil && !errors.Is(err, grpc.ErrServerStopped) {
 		return fmt.Errorf("serve grpc: %w", err)
 	}
 	return nil
