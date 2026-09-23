@@ -31,3 +31,13 @@ WHERE user_id = @user_id
   AND (created_at, id) < (@after_created_at::timestamptz, @after_id::bigint)
 ORDER BY created_at DESC, id DESC
 LIMIT @row_limit::bigint;
+
+-- name: GetOrderByIdempotencyKey :one
+SELECT o.id, o.user_id, o.total_cents, o.created_at, k.request_hash
+FROM order_idempotency_keys k
+JOIN orders o ON o.id = k.order_id
+WHERE k.key = $1;
+
+-- name: InsertIdempotencyKey :exec
+INSERT INTO order_idempotency_keys (user_id, key, request_hash, order_id)
+VALUES ($1, $2, $3, $4);

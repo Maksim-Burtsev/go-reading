@@ -38,7 +38,7 @@ func TestStore(t *testing.T) {
 
 	applied, err := db.Migrate(ctx, pool)
 	require.NoError(t, err)
-	require.Equal(t, []int64{1, 2}, applied)
+	require.Equal(t, []int64{1, 2, 3}, applied)
 
 	applied, err = db.Migrate(ctx, pool)
 	require.NoError(t, err)
@@ -57,6 +57,10 @@ func TestStore(t *testing.T) {
 	t.Run("list orders", func(t *testing.T) {
 		t.Parallel()
 		testListOrders(t, s)
+	})
+	t.Run("idempotent create order", func(t *testing.T) {
+		t.Parallel()
+		testIdempotentCreateOrder(t, s, pool)
 	})
 }
 
@@ -129,7 +133,7 @@ func testCreateOrder(t *testing.T, s *store.Store, pool *pgxpool.Pool) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			order, err := s.CreateOrder(t.Context(), tt.userID, tt.items)
+			order, err := s.CreateOrder(t.Context(), tt.userID, "", tt.items)
 			if tt.wantErr != nil {
 				require.ErrorIs(t, err, tt.wantErr)
 				return
@@ -161,7 +165,7 @@ func testListOrders(t *testing.T, s *store.Store) {
 	const total = 5
 	created := make([]int64, 0, total)
 	for i := range total {
-		order, err := s.CreateOrder(ctx, user.ID, []store.Item{{SKU: fmt.Sprintf("SKU-%d", i), Quantity: 1, UnitPriceCents: 100}})
+		order, err := s.CreateOrder(ctx, user.ID, "", []store.Item{{SKU: fmt.Sprintf("SKU-%d", i), Quantity: 1, UnitPriceCents: 100}})
 		require.NoError(t, err)
 		created = append(created, order.ID)
 	}
@@ -204,4 +208,40 @@ func testListOrders(t *testing.T, s *store.Store) {
 	require.NoError(t, err)
 	require.Empty(t, page.Orders)
 	require.Nil(t, page.Next)
+}
+
+func testIdempotentCreateOrder(t *testing.T, s *store.Store, pool *pgxpool.Pool) {
+	ctx := t.Context()
+
+	user, err := s.CreateUser(ctx, "retries@example.com", "Retrier")
+	require.NoError(t, err)
+	items := []store.Item{{SKU: "BOOK-1", Quantity: 2, UnitPriceCents: 1999}}
+
+	t.Run("retry with the same key returns the original order", func(t *testing.T) {
+		first, err := s.CreateOrder(ctx, user.ID, "retry-1", items)
+		require.NoError(t, err)
+
+		retry, err := s.CreateOrder(ctx, user.ID, "retry-1", items)
+		require.NoError(t, err)
+		require.Equal(t, first.ID, retry.ID)
+		require.Equal(t, first.TotalCents, retry.TotalCents)
+		require.Equal(t, items, retry.Items)
+	})
+	t.Run("key reused with other items", func(t *testing.T) {
+		_, err := s.CreateOrder(ctx, user.ID, "retry-1", []store.Item{{SKU: "BOOK-1", Quantity: 3, UnitPriceCents: 1999}})
+		require.ErrorIs(t, err, store.ErrIdempotencyKeyReused)
+	})
+	t.Run("concurrent retries with the same key place one order", func(t *testing.T) {
+		first, err := s.CreateOrder(ctx, user.ID, "retry-2", items)
+		require.NoError(t, err)
+
+		second, err := s.CreateOrder(ctx, user.ID, "retry-2", items)
+		require.NoError(t, err)
+		require.Equal(t, first.ID, second.ID)
+	})
+
+	var orders int
+	err = pool.QueryRow(ctx, `SELECT count(*) FROM orders WHERE user_id = $1`, user.ID).Scan(&orders)
+	require.NoError(t, err)
+	require.Equal(t, 2, orders, "retries must not place orders")
 }

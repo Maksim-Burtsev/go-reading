@@ -4,9 +4,12 @@ package store
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgerrcode"
@@ -33,6 +36,9 @@ var (
 	// ErrInvalidOrder is returned when an order has no items or violates a
 	// database constraint.
 	ErrInvalidOrder = errors.New("invalid order")
+	// ErrIdempotencyKeyReused is returned when an idempotency key comes back
+	// with other items than the order it was first used for.
+	ErrIdempotencyKeyReused = errors.New("idempotency key reused with other items")
 )
 
 // User is a registered customer.
@@ -102,15 +108,30 @@ func (s *Store) GetUser(ctx context.Context, id int64) (User, error) {
 }
 
 // CreateOrder atomically places an order with its items for an existing user
-// and returns it with the total computed by the database.
-func (s *Store) CreateOrder(ctx context.Context, userID int64, items []Item) (Order, error) {
+// and returns it with the total computed by the database. A non-empty key makes
+// the call idempotent: a retry with the same key and the same items, listed in
+// any order, returns the order placed by the first call, and a retry with other
+// items fails with ErrIdempotencyKeyReused.
+func (s *Store) CreateOrder(ctx context.Context, userID int64, key string, items []Item) (Order, error) {
 	if len(items) == 0 {
 		return Order{}, fmt.Errorf("%w: no items", ErrInvalidOrder)
 	}
+	hash := requestHash(items)
 
 	var order Order
 	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
 		q := s.queries.WithTx(tx)
+
+		if key != "" {
+			prev, err := q.GetOrderByIdempotencyKey(ctx, key)
+			switch {
+			case err == nil:
+				order, err = replayOrder(prev, hash, items)
+				return err
+			case !errors.Is(err, pgx.ErrNoRows):
+				return fmt.Errorf("select idempotency key: %w", err)
+			}
+		}
 
 		if _, err := q.LockUser(ctx, userID); err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
@@ -140,6 +161,28 @@ func (s *Store) CreateOrder(ctx context.Context, userID int64, items []Item) (Or
 		row, err = q.UpdateOrderTotal(ctx, row.ID)
 		if err != nil {
 			return fmt.Errorf("update order total: %w", err)
+		}
+
+		if key != "" {
+			err := q.InsertIdempotencyKey(ctx, sqlc.InsertIdempotencyKeyParams{
+				UserID:      userID,
+				Key:         key,
+				RequestHash: hash,
+				OrderID:     row.ID,
+			})
+			var pgErr *pgconn.PgError
+			if errors.As(err, &pgErr) && pgErr.Code == pgerrcode.UniqueViolation {
+				// A concurrent request with the same key committed first: answer with its order.
+				prev, err := q.GetOrderByIdempotencyKey(ctx, key)
+				if err != nil {
+					return fmt.Errorf("select idempotency key: %w", err)
+				}
+				order, err = replayOrder(prev, hash, items)
+				return err
+			}
+			if err != nil {
+				return fmt.Errorf("insert idempotency key: %w", err)
+			}
 		}
 
 		order = orderFromRow(row)
@@ -200,6 +243,39 @@ func (s *Store) ListOrders(ctx context.Context, userID int64, after *Cursor, lim
 		page.Orders = append(page.Orders, orderFromRow(row))
 	}
 	return page, nil
+}
+
+func replayOrder(prev sqlc.GetOrderByIdempotencyKeyRow, hash string, items []Item) (Order, error) {
+	if prev.RequestHash != hash {
+		return Order{}, ErrIdempotencyKeyReused
+	}
+	return Order{
+		ID:         prev.ID,
+		UserID:     prev.UserID,
+		TotalCents: prev.TotalCents,
+		CreatedAt:  prev.CreatedAt,
+		Items:      slices.Clone(items),
+	}, nil
+}
+
+// requestHash identifies an order's items regardless of the order they are
+// listed in. Lines with the same SKU and price count as one.
+func requestHash(items []Item) string {
+	type line struct {
+		sku   string
+		price int64
+	}
+	lines := make(map[line]int64, len(items))
+	for _, it := range items {
+		lines[line{it.SKU, it.UnitPriceCents}] += int64(it.Quantity)
+	}
+
+	var b strings.Builder
+	for l, qty := range lines {
+		fmt.Fprintf(&b, "%q %d %d\n", l.sku, l.price, qty)
+	}
+	sum := sha256.Sum256([]byte(b.String()))
+	return hex.EncodeToString(sum[:])
 }
 
 func orderFromRow(row sqlc.Order) Order {

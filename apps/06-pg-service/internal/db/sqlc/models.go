@@ -15,6 +15,14 @@ type Order struct {
 	CreatedAt  time.Time
 }
 
+type OrderIdempotencyKey struct {
+	UserID      int64
+	Key         string
+	RequestHash string
+	OrderID     int64
+	CreatedAt   time.Time
+}
+
 type OrderItem struct {
 	ID             int64
 	OrderID        int64

@@ -25,6 +25,7 @@ type fakeStore struct {
 
 	gotUserID int64
 	gotEmail  string
+	gotKey    string
 	gotItems  []store.Item
 	gotAfter  *store.Cursor
 	gotLimit  int
@@ -47,8 +48,8 @@ func (f *fakeStore) GetUser(_ context.Context, id int64) (store.User, error) {
 	return store.User{ID: id, Email: "ann@example.com", Name: "Ann", CreatedAt: createdAt}, nil
 }
 
-func (f *fakeStore) CreateOrder(_ context.Context, userID int64, items []store.Item) (store.Order, error) {
-	f.gotUserID, f.gotItems = userID, items
+func (f *fakeStore) CreateOrder(_ context.Context, userID int64, key string, items []store.Item) (store.Order, error) {
+	f.gotUserID, f.gotKey, f.gotItems = userID, key, items
 	if f.err != nil {
 		return store.Order{}, f.err
 	}
@@ -160,6 +161,39 @@ func TestCreateOrder(t *testing.T) {
 		"created_at": "2026-09-21T10:00:00Z",
 		"items": [{"sku": "A-1", "quantity": 2, "unit_price_cents": 1250}]
 	}`, rec.Body.String())
+}
+
+func TestCreateOrderIdempotencyKey(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		key        string
+		wantStatus int
+		wantKey    string
+	}{
+		{"no key", "", http.StatusCreated, ""},
+		{"key is passed to the store", "2c1b7d0e-order-42", http.StatusCreated, "2c1b7d0e-order-42"},
+		{"longest key", strings.Repeat("k", 255), http.StatusCreated, strings.Repeat("k", 255)},
+		{"key too long", strings.Repeat("k", 256), http.StatusBadRequest, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			fake := &fakeStore{}
+			req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/users/42/orders",
+				strings.NewReader(`{"items":[{"sku":"A-1","quantity":2,"unit_price_cents":1250}]}`))
+			if tt.key != "" {
+				req.Header.Set("Idempotency-Key", tt.key)
+			}
+			rec := httptest.NewRecorder()
+			httpapi.NewHandler(slog.New(slog.DiscardHandler), fake, nil).ServeHTTP(rec, req)
+
+			require.Equal(t, tt.wantStatus, rec.Code)
+			require.Equal(t, tt.wantKey, fake.gotKey)
+		})
+	}
 }
 
 func TestListOrdersPagination(t *testing.T) {

@@ -22,8 +22,9 @@ import (
 )
 
 const (
-	maxNameLength = 200
-	maxOrderItems = 100
+	maxNameLength           = 200
+	maxOrderItems           = 100
+	maxIdempotencyKeyLength = 255
 )
 
 var (
@@ -35,7 +36,7 @@ var (
 type Store interface {
 	CreateUser(ctx context.Context, email, name string) (store.User, error)
 	GetUser(ctx context.Context, id int64) (store.User, error)
-	CreateOrder(ctx context.Context, userID int64, items []store.Item) (store.Order, error)
+	CreateOrder(ctx context.Context, userID int64, key string, items []store.Item) (store.Order, error)
 	ListOrders(ctx context.Context, userID int64, after *store.Cursor, limit int) (store.OrderPage, error)
 }
 
@@ -112,6 +113,11 @@ func (h *handler) createOrder(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, r, http.StatusBadRequest, err.Error())
 		return
 	}
+	key := r.Header.Get("Idempotency-Key")
+	if len(key) > maxIdempotencyKeyLength {
+		h.writeError(w, r, http.StatusBadRequest, fmt.Sprintf("Idempotency-Key must be at most %d bytes", maxIdempotencyKeyLength))
+		return
+	}
 
 	var req createOrderRequest
 	if err := decodeJSON(w, r, &req); err != nil {
@@ -128,7 +134,7 @@ func (h *handler) createOrder(w http.ResponseWriter, r *http.Request) {
 		items = append(items, store.Item(it))
 	}
 
-	order, err := h.store.CreateOrder(r.Context(), userID, items)
+	order, err := h.store.CreateOrder(r.Context(), userID, key, items)
 	if err != nil {
 		h.fail(w, r, err)
 		return

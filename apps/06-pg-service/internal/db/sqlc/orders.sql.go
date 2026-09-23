@@ -28,6 +28,56 @@ func (q *Queries) CreateOrder(ctx context.Context, userID int64) (Order, error) 
 	return i, err
 }
 
+const getOrderByIdempotencyKey = `-- name: GetOrderByIdempotencyKey :one
+SELECT o.id, o.user_id, o.total_cents, o.created_at, k.request_hash
+FROM order_idempotency_keys k
+JOIN orders o ON o.id = k.order_id
+WHERE k.key = $1
+`
+
+type GetOrderByIdempotencyKeyRow struct {
+	ID          int64
+	UserID      int64
+	TotalCents  int64
+	CreatedAt   time.Time
+	RequestHash string
+}
+
+func (q *Queries) GetOrderByIdempotencyKey(ctx context.Context, key string) (GetOrderByIdempotencyKeyRow, error) {
+	row := q.db.QueryRow(ctx, getOrderByIdempotencyKey, key)
+	var i GetOrderByIdempotencyKeyRow
+	err := row.Scan(
+		&i.ID,
+		&i.UserID,
+		&i.TotalCents,
+		&i.CreatedAt,
+		&i.RequestHash,
+	)
+	return i, err
+}
+
+const insertIdempotencyKey = `-- name: InsertIdempotencyKey :exec
+INSERT INTO order_idempotency_keys (user_id, key, request_hash, order_id)
+VALUES ($1, $2, $3, $4)
+`
+
+type InsertIdempotencyKeyParams struct {
+	UserID      int64
+	Key         string
+	RequestHash string
+	OrderID     int64
+}
+
+func (q *Queries) InsertIdempotencyKey(ctx context.Context, arg InsertIdempotencyKeyParams) error {
+	_, err := q.db.Exec(ctx, insertIdempotencyKey,
+		arg.UserID,
+		arg.Key,
+		arg.RequestHash,
+		arg.OrderID,
+	)
+	return err
+}
+
 type InsertOrderItemsParams struct {
 	OrderID        int64
 	Sku            string
