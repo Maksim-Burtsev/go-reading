@@ -15,11 +15,14 @@ import (
 var ErrShutdownTimeout = errors.New("running jobs did not finish within the grace period")
 
 // Entry binds a job to its lock name and cron schedule. Specs have six fields,
-// the first one being seconds, or are descriptors such as "@every 1m".
+// the first one being seconds, or are descriptors such as "@every 1m". An entry
+// without a Job is disabled. RunOnStart also runs the job once when Serve
+// starts, instead of waiting for its first tick.
 type Entry struct {
-	Name string
-	Spec string
-	Job  Job
+	Name       string
+	Spec       string
+	Job        Job
+	RunOnStart bool
 }
 
 // Serve runs entries on their schedules in UTC until ctx is cancelled. It then
@@ -36,14 +39,25 @@ func (r *Runner) Serve(ctx context.Context, entries []Entry, grace time.Duration
 		cron.WithLogger(logger),
 		cron.WithChain(cron.SkipIfStillRunning(logger), cron.Recover(logger)),
 	)
+	var startup []Entry
 	for _, e := range entries {
+		if e.Job == nil {
+			r.logger.InfoContext(ctx, "job disabled", "job", e.Name)
+			continue
+		}
 		if _, err := c.AddFunc(e.Spec, func() { r.Run(jobCtx, e.Name, e.Job) }); err != nil {
 			return fmt.Errorf("schedule job %s: %w", e.Name, err)
+		}
+		if e.RunOnStart {
+			startup = append(startup, e)
 		}
 	}
 
 	c.Start()
-	r.logger.InfoContext(ctx, "scheduler started", "jobs", len(entries))
+	r.logger.InfoContext(ctx, "scheduler started", "jobs", len(c.Entries()))
+	for _, e := range startup {
+		go func() { r.Run(jobCtx, e.Name, e.Job) }()
+	}
 	<-ctx.Done()
 	r.logger.InfoContext(ctx, "scheduler stopping", "grace", grace.String())
 

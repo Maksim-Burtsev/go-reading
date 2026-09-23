@@ -104,6 +104,49 @@ func (j *RollupEvents) Run(ctx context.Context) error {
 	return nil
 }
 
+const rollupRecentEventsSQL = `
+INSERT INTO daily_event_stats (day, event_type, event_count, unique_users)
+SELECT $1::date, event_type, count(*), count(DISTINCT user_id)
+FROM events
+WHERE occurred_at >= $2 AND occurred_at < $3
+GROUP BY event_type
+ON CONFLICT (day, event_type) DO UPDATE
+SET event_count = daily_event_stats.event_count + EXCLUDED.event_count,
+    unique_users = daily_event_stats.unique_users + EXCLUDED.unique_users,
+    computed_at = now()`
+
+// RollupRecentEvents keeps the current day in daily_event_stats up to date:
+// each run adds the events of the last complete window to the day the window
+// starts in, so the day's totals lag by at most one window.
+type RollupRecentEvents struct {
+	db     DB
+	clock  Clock
+	logger *slog.Logger
+	window time.Duration
+}
+
+// NewRollupRecentEvents returns a RollupRecentEvents job. window must be
+// positive and divide a day.
+func NewRollupRecentEvents(db DB, clock Clock, logger *slog.Logger, window time.Duration) *RollupRecentEvents {
+	return &RollupRecentEvents{db: db, clock: clock, logger: logger, window: window}
+}
+
+// Run adds the events of the last complete window, in UTC.
+func (j *RollupRecentEvents) Run(ctx context.Context) error {
+	to := j.clock.Now().UTC().Truncate(j.window)
+	from := to.Add(-j.window)
+	y, m, d := from.Date()
+	day := pgtype.Date{Time: time.Date(y, m, d, 0, 0, 0, 0, time.UTC), Valid: true}
+
+	tag, err := j.db.Exec(ctx, rollupRecentEventsSQL, day, from, to)
+	if err != nil {
+		return fmt.Errorf("roll up events from %s to %s: %w", from.Format(time.RFC3339), to.Format(time.RFC3339), err)
+	}
+	j.logger.InfoContext(ctx, "recent event stats rolled up",
+		"from", from, "to", to, "event_types", tag.RowsAffected())
+	return nil
+}
+
 const expireOrdersSQL = `
 UPDATE orders
 SET status = 'expired', updated_at = now()

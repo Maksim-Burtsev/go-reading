@@ -19,10 +19,12 @@ type config struct {
 
 	PurgeSessionsSchedule string `env:"PURGE_SESSIONS_SCHEDULE" envDefault:"0 */5 * * * *"`
 	RollupEventsSchedule  string `env:"ROLLUP_EVENTS_SCHEDULE" envDefault:"0 15 0 * * *"`
+	RollupRecentSchedule  string `env:"ROLLUP_RECENT_SCHEDULE" envDefault:"0 */5 * * * *"`
 	ExpireOrdersSchedule  string `env:"EXPIRE_ORDERS_SCHEDULE" envDefault:"30 * * * * *"`
 
 	SessionPurgeBatchSize int           `env:"SESSION_PURGE_BATCH_SIZE" envDefault:"1000"`
 	PendingOrderTTL       time.Duration `env:"PENDING_ORDER_TTL" envDefault:"30m"`
+	RollupRecentWindow    time.Duration `env:"ROLLUP_RECENT_WINDOW" envDefault:"5m"`
 }
 
 func parseConfig(getenv func(string) string) (config, error) {
@@ -48,6 +50,8 @@ func parseConfig(getenv func(string) string) (config, error) {
 		return config{}, fmt.Errorf("%w: PENDING_ORDER_TTL must be positive", errInvalidConfig)
 	case cfg.ShutdownTimeout <= 0:
 		return config{}, fmt.Errorf("%w: SHUTDOWN_TIMEOUT must be positive", errInvalidConfig)
+	case cfg.RollupRecentWindow < 0 || (cfg.RollupRecentWindow > 0 && (24*time.Hour)%cfg.RollupRecentWindow != 0):
+		return config{}, fmt.Errorf("%w: ROLLUP_RECENT_WINDOW must divide 24h, or be 0 to disable the job", errInvalidConfig)
 	}
 	return cfg, nil
 }

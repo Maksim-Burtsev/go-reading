@@ -119,12 +119,59 @@ func TestRunnerServeKeepsSchedulingAPanickingJob(t *testing.T) {
 	require.GreaterOrEqual(t, locker.unlocks, 2, "the lock was not released after a panic")
 }
 
+func TestRunnerServeRunOnStart(t *testing.T) {
+	t.Parallel()
+
+	runner, err := NewRunner(slog.New(slog.DiscardHandler), &fakeLocker{acquired: true}, &fakeClock{}, prometheus.NewRegistry())
+	require.NoError(t, err)
+
+	ran := make(chan struct{}, 1)
+	job := jobFunc(func(context.Context) error {
+		select {
+		case ran <- struct{}{}:
+		default:
+		}
+		return nil
+	})
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	served := make(chan error, 1)
+	go func() {
+		served <- runner.Serve(ctx, []Entry{{Name: "job", Spec: "* * * * * *", Job: job, RunOnStart: true}}, time.Second)
+	}()
+
+	select {
+	case <-ran:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the job did not run on start")
+	}
+	cancel()
+	require.NoError(t, <-served)
+}
+
+func TestRunnerServeSkipsEntriesWithoutJob(t *testing.T) {
+	t.Parallel()
+
+	locker := &fakeLocker{acquired: true}
+	runner, err := NewRunner(slog.New(slog.DiscardHandler), locker, &fakeClock{}, prometheus.NewRegistry())
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 1500*time.Millisecond)
+	defer cancel()
+	err = runner.Serve(ctx, []Entry{{Name: "disabled", Spec: "* * * * * *"}}, time.Second)
+
+	require.NoError(t, err)
+	require.Zero(t, locker.unlocks, "a disabled entry was run")
+}
+
 func TestRunnerServeRejectsInvalidSpec(t *testing.T) {
 	t.Parallel()
 
 	runner, err := NewRunner(slog.New(slog.DiscardHandler), &fakeLocker{}, &fakeClock{}, prometheus.NewRegistry())
 	require.NoError(t, err)
 
-	err = runner.Serve(t.Context(), []Entry{{Name: "job", Spec: "*/5 * * * *"}}, time.Second)
+	job := jobFunc(func(context.Context) error { return nil })
+	err = runner.Serve(t.Context(), []Entry{{Name: "job", Spec: "*/5 * * * *", Job: job}}, time.Second)
 	require.ErrorContains(t, err, "schedule job job")
 }

@@ -100,6 +100,32 @@ func TestJobsRun(t *testing.T) {
 			}},
 		},
 		{
+			name: "recent rollup adds the last complete window",
+			now:  time.Date(2026, 9, 21, 10, 32, 10, 0, time.UTC),
+			db:   fakeDB{affected: []int64{2}},
+			newJob: func(db DB, c Clock) job {
+				return NewRollupRecentEvents(db, c, discard, 5*time.Minute)
+			},
+			wantCalls: [][]any{{
+				pgtype.Date{Time: time.Date(2026, 9, 21, 0, 0, 0, 0, time.UTC), Valid: true},
+				time.Date(2026, 9, 21, 10, 25, 0, 0, time.UTC),
+				time.Date(2026, 9, 21, 10, 30, 0, 0, time.UTC),
+			}},
+		},
+		{
+			name: "recent rollup after midnight closes the previous day",
+			now:  time.Date(2026, 9, 22, 3, 2, 0, 0, moscow),
+			db:   fakeDB{affected: []int64{2}},
+			newJob: func(db DB, c Clock) job {
+				return NewRollupRecentEvents(db, c, discard, 5*time.Minute)
+			},
+			wantCalls: [][]any{{
+				pgtype.Date{Time: time.Date(2026, 9, 21, 0, 0, 0, 0, time.UTC), Valid: true},
+				time.Date(2026, 9, 21, 23, 55, 0, 0, time.UTC),
+				time.Date(2026, 9, 22, 0, 0, 0, 0, time.UTC),
+			}},
+		},
+		{
 			name: "expire orders older than the TTL",
 			now:  now,
 			db:   fakeDB{affected: []int64{3}},

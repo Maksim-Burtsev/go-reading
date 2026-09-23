@@ -83,6 +83,12 @@ func run(ctx context.Context, _ []string, getenv func(string) string, stdout, _ 
 			Spec: cfg.ExpireOrdersSchedule,
 			Job:  jobs.NewExpireOrders(pool, clock, logger, cfg.PendingOrderTTL),
 		},
+		{
+			Name:       "rollup-recent-events",
+			Spec:       cfg.RollupRecentSchedule,
+			Job:        newRollupRecent(cfg, pool, clock, logger),
+			RunOnStart: true,
+		},
 	}
 
 	var lc net.ListenConfig
@@ -123,6 +129,15 @@ func run(ctx context.Context, _ []string, getenv func(string) string, stdout, _ 
 	}
 	logger.InfoContext(ctx, "shutdown complete")
 	return nil
+}
+
+// newRollupRecent returns the intraday rollup, or nil when ROLLUP_RECENT_WINDOW
+// is 0 and the job is disabled.
+func newRollupRecent(cfg config, db jobs.DB, clock jobs.Clock, logger *slog.Logger) *jobs.RollupRecentEvents {
+	if cfg.RollupRecentWindow == 0 {
+		return nil
+	}
+	return jobs.NewRollupRecentEvents(db, clock, logger, cfg.RollupRecentWindow)
 }
 
 type pinger interface {
