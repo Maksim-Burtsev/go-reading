@@ -1,63 +1,72 @@
 # go-reading
 
-Small production-grade Go applications, written to be read and reviewed.
+Twelve small Go services, written the way good production Go is written, for practice in reading
+and reviewing Go. There are no teaching shortcuts and no comments that explain the language: this is
+the code you will meet at work.
 
-The reader is a backend engineer fluent in Python who is learning to read Go. The code is what
-good production Go looks like: no teaching shortcuts and no comments that explain the language.
-Each application lives in `apps/NN-name/` with its own `cmd/` and `internal/`, under one `go.mod`.
+## How to use it
 
-## How to read
+Take the apps in order. Each one is a read, then a review.
 
-Read with [merl](https://github.com/Maksim-Burtsev/merl):
+**Read.** Open the app in [merl](https://github.com/Maksim-Burtsev/merl): `merl apps/01-cli-wordfreq`
+(`merl --tutor` teaches the keys in ten minutes). A Go service starts in `cmd/<name>/main.go`: `main`
+calls `run`, and `run` wires up what lives in `internal/`. The app's `READING.md` shows how to run it
+and asks six to eight questions. Answer each one from the code before you open its answer; in order,
+they take you from `main` to the core of the app.
 
-```sh
-brew install maksim-burtsev/tap/merl
-merl apps/01-cli-wordfreq
-```
-
-Start at `cmd/*/main.go`, follow `main` into `run`, and from there into `internal/`. `d` goes to a
-definition, `u` lists usages, `[` comes back, `s` searches the project, `D` lists its symbols.
-
-Run an application:
+**Review.** Each app has a review branch: one PR-sized change to that app, with defects planted in
+it.
 
 ```sh
-make run-01-cli-wordfreq ARGS="..."
+merl --review=review/001-keep-going
 ```
 
-## Applications
+switches to the branch and walks its diff against master, `c` / `C` for the next and previous hunk.
+`PR.md`, the first file, says what the change is for. Write down every problem you would block the
+PR on, with file and line. CI is green on these branches, so the linters and tests found nothing:
+what is left is what only a reader sees. Then `git switch master`.
 
-Each application has a `READING.md`: where to start, the data flow, Go-specific spots and questions.
+**Grade.** Tell Claude, in this repository, "verdict for 001: …". It checks your list against the
+answer key, explains each defect you missed and why each false alarm is fine, and adds a row to
+[`review/LOG.md`](review/LOG.md). The key is `SOLUTION.md` on `review/001-keep-going-solution`;
+leave it closed until you have given a verdict.
 
-- [01-cli-wordfreq](apps/01-cli-wordfreq/READING.md) — cobra CLI: word frequency and dedupe, bounded errgroup fan-out, tabwriter.
-- [02-http-notes](apps/02-http-notes/READING.md) — net/http JSON CRUD: ServeMux `{id}` routing, middleware chain, validator, graceful shutdown.
-- [03-ratelimiter](apps/03-ratelimiter/READING.md) — token bucket and sliding window behind one interface, fake clock, `X-RateLimit-*` middleware.
-- [04-worker-pool](apps/04-worker-pool/READING.md) — webhook dispatcher: bounded queue, errgroup workers, backoff with jitter, graceful drain, goleak.
-- [05-lru-cache](apps/05-lru-cache/READING.md) — generic LRU with TTL and OnEvict, benchmarks, read-through caching proxy with singleflight.
-- [06-pg-service](apps/06-pg-service/READING.md) — chi + pgx + sqlc + goose: order transaction, keyset pagination, `PgError` → 409, testcontainers.
-- [07-kafka-consumer](apps/07-kafka-consumer/READING.md) — franz-go consumer group: size/time batching, commit after write, retries, dead-letter topic.
-- [08-grpc-service](apps/08-grpc-service/READING.md) — buf-generated gRPC inventory: server streaming, interceptors, deadlines, status codes, bufconn.
-- [09-cron-worker](apps/09-cron-worker/READING.md) — robfig/cron jobs under Postgres advisory locks, duration metrics, fake clock.
-- [10-tui-app](apps/10-tui-app/READING.md) — bubbletea + lipgloss: two-pane task list with a filter, `Update` tested as a pure function.
-- [11-clickhouse-sink](apps/11-clickhouse-sink/READING.md) — HTTP ingest into ClickHouse batches, 429 backpressure, Prometheus metrics, health check.
-- [12-eventsink](apps/12-eventsink/READING.md) — Kafka → ClickHouse batches with Postgres batch ledger, idempotent replay, distroless image, ADR-001.
+## Apps
 
-## Review branches
+1. [cli-wordfreq](apps/01-cli-wordfreq/READING.md) — cobra CLI: word frequency and dedupe, bounded
+   errgroup fan-out, tabwriter. Review: `review/001-keep-going`.
+2. [http-notes](apps/02-http-notes/READING.md) — net/http JSON CRUD: ServeMux `{id}` routing,
+   middleware chain, validator, graceful shutdown. Review: `review/002-tag-filter`.
+3. [ratelimiter](apps/03-ratelimiter/READING.md) — token bucket and sliding window behind one
+   interface, fake clock, `X-RateLimit-*` middleware. Review: `review/003-delay-instead-of-reject`.
+4. [worker-pool](apps/04-worker-pool/READING.md) — webhook dispatcher: bounded queue, errgroup
+   workers, backoff with jitter, graceful drain, goleak. Review: `review/004-per-host-limit`.
+5. [lru-cache](apps/05-lru-cache/READING.md) — generic LRU with TTL and OnEvict, benchmarks,
+   read-through caching proxy with singleflight. Review: `review/005-cache-snapshots`.
+6. [pg-service](apps/06-pg-service/READING.md) — chi + pgx + sqlc + goose: order transaction,
+   keyset pagination, `PgError` → 409, testcontainers. Review: `review/006-order-idempotency-keys`.
+7. [kafka-consumer](apps/07-kafka-consumer/READING.md) — franz-go consumer group: size/time
+   batching, commit after write, retries, dead-letter topic. Review: `review/007-pipelined-flush`.
+8. [grpc-service](apps/08-grpc-service/READING.md) — buf-generated gRPC inventory: server
+   streaming, interceptors, deadlines, status codes, bufconn. Review: `review/008-release-reservation`.
+9. [cron-worker](apps/09-cron-worker/READING.md) — robfig/cron jobs under Postgres advisory locks,
+   duration metrics, fake clock. Review: `review/009-intraday-rollup`.
+10. [tui-app](apps/10-tui-app/READING.md) — bubbletea + lipgloss: two-pane task list with a filter,
+    `Update` tested as a pure function. Review: `review/010-autosave`.
+11. [clickhouse-sink](apps/11-clickhouse-sink/READING.md) — HTTP ingest into ClickHouse batches,
+    429 backpressure, Prometheus metrics, health check. Review: `review/011-buffer-byte-budget`.
+12. [eventsink](apps/12-eventsink/READING.md) — Kafka → ClickHouse batches with a Postgres batch
+    ledger, idempotent replay, distroless image, ADR-001. Review: `review/012-dead-letter-rejected-events`.
 
-Each review is a pull-request-shaped branch off `master` with issues planted in it.
-
-1. `merl --review=review/NNN-topic` fetches the branch, switches to it and shows its diff against
-   `master`. `c` / `C` walk the hunks.
-2. Write down the verdict: every issue found, with file and line.
-3. Only then open `review/NNN-topic-solution`, which holds the answers.
-4. Add a row to [`review/LOG.md`](review/LOG.md) on `master`: planted, found, false positives,
-   minutes spent.
+How the questions and the reviews are written, and how new ones get added:
+[AUTHORING.md](AUTHORING.md).
 
 ## Checks
 
 ```sh
 make lint              # gofmt, go vet, golangci-lint
 make test              # go test -race
-make test-integration  # plus //go:build integration tests, needs Docker
+make test-integration  # plus the //go:build integration tests, needs Docker
 ```
 
 CI runs `make lint` and `make test` on every push.

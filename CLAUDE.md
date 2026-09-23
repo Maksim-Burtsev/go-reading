@@ -9,8 +9,11 @@ Everything in this repository is in English: code, comments, commit messages, do
 ## Tooling
 - Go 1.27. A single go.mod at the root; each application is its own directory
   `apps/NN-name/` with its own `cmd/` and `internal/`.
-- Before every commit: `make lint test` (`gofmt -l .`, `go vet ./...`, `golangci-lint run`,
-  `go test -race ./...`). Everything must be clean. Do not commit if anything is red.
+- Before every commit that changes code: `make lint test` (`gofmt -l .`, `go vet ./...`,
+  `golangci-lint run`, `go test -race ./...`). Everything must be clean. Do not commit if anything
+  is red.
+- Untracked files in the checkout are the reader's own exercises: leave them as they are, and when
+  they break `make lint`, run the checks in a clean worktree.
 - Linter: `.golangci.yml` at the root, with errcheck, govet, staticcheck, gocritic,
   errorlint, bodyclose, noctx, sqlclosecheck, contextcheck, gosec, revive, unused enabled.
 
@@ -30,7 +33,18 @@ Everything in this repository is in English: code, comments, commit messages, do
 - Go 1.22+ idioms: `for range n`, `min`/`max`, `slices`/`maps`, `net/http` routing
   with methods and `{id}`, `r.PathValue`.
 
-## Review branches
-- `review/NNN-topic` is the PR branch to read. `review/NNN-topic-solution` holds the answers.
-  Never reveal the contents of a solution branch until the reader has stated their verdict.
-- `review/LOG.md` on master is the results log.
+## Reading and reviews
+- The reader's loop is in README.md. Writing a READING.md or a new review branch: follow
+  AUTHORING.md.
+- `review/NNN-slug` is a PR with planted defects; its answer key is `SOLUTION.md` on
+  `review/NNN-slug-solution`. The key stays sealed: until the reader gives a verdict for that
+  review, nothing from the solution branch reaches them, hints included.
+- Grading a verdict ("verdict for 003: …", in any language):
+  1. `git fetch origin`, then read `git show origin/review/003-<slug>-solution:SOLUTION.md`.
+  2. Match each finding to a defect by its "Found if" line. A finding that matches nothing is a
+     false positive, unless it is listed under "Also acceptable" or is a real problem the key
+     lacks: credit it, and add a missing one to SOLUTION.md on the solution branch.
+  3. Answer in the reader's language: what they found; each missed defect with its tell and rule;
+     each false positive with why the code is fine.
+  4. Append a row to `review/LOG.md` on master (ask for the minutes if they were not given),
+     commit, push.
