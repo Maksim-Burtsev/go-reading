@@ -95,7 +95,7 @@ func run(ctx context.Context, _ []string, getenv func(string) string, _, stderr 
 	defer cancel()
 
 	if err := srv.Shutdown(shutdownCtx); err != nil {
-		return fmt.Errorf("shutdown: %w", err)
+		return fmt.Errorf("shutdown: %w", errors.Join(err, srv.Close()))
 	}
 	if err := <-serveErr; !errors.Is(err, http.ErrServerClosed) {
 		return fmt.Errorf("serve: %w", err)

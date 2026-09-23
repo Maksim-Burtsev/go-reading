@@ -20,6 +20,8 @@ func TestCursorRoundTrip(t *testing.T) {
 		{"microsecond precision", store.Cursor{CreatedAt: time.Date(2026, 9, 21, 12, 30, 45, 123456000, time.UTC), ID: 42}},
 		{"before unix epoch", store.Cursor{CreatedAt: time.Date(1969, 7, 20, 20, 17, 0, 0, time.UTC), ID: 1}},
 		{"max id", store.Cursor{CreatedAt: time.Unix(0, 0), ID: 1<<63 - 1}},
+		{"earliest timestamptz", store.Cursor{CreatedAt: time.Date(-4713, time.November, 24, 0, 0, 0, 0, time.UTC), ID: 1}},
+		{"latest int64 microsecond", store.Cursor{CreatedAt: time.UnixMicro(1<<63 - 1), ID: 1}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -60,6 +62,8 @@ func TestDecodeCursorRejectsMalformedTokens(t *testing.T) {
 		{"zero id", encode("1700000000000000:0")},
 		{"negative id", encode("1700000000000000:-5")},
 		{"id overflows int64", encode("1700000000000000:9223372036854775808")},
+		{"timestamp before timestamptz range", encode("-210866803200000001:1")},
+		{"minimum int64 timestamp", encode("-9223372036854775808:1")},
 		{"empty", ""},
 	}
 	for _, tt := range tests {

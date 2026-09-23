@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"
@@ -143,7 +144,7 @@ func testCreateOrder(t *testing.T, s *store.Store, pool *pgxpool.Pool) {
 	var orders, items int
 	err = pool.QueryRow(t.Context(),
 		`SELECT count(DISTINCT o.id), count(i.id)
-		 FROM orders o JOIN order_items i ON i.order_id = o.id
+		 FROM orders o LEFT JOIN order_items i ON i.order_id = o.id
 		 WHERE o.user_id = $1`, user.ID,
 	).Scan(&orders, &items)
 	require.NoError(t, err)
@@ -188,12 +189,18 @@ func testListOrders(t *testing.T, s *store.Store) {
 	slices.Reverse(created)
 	require.Equal(t, created, seen)
 
+	earliest, err := store.DecodeCursor(store.Cursor{CreatedAt: time.Date(-4713, time.November, 24, 0, 0, 0, 0, time.UTC), ID: 1}.Encode())
+	require.NoError(t, err)
+	page, err := s.ListOrders(ctx, user.ID, &earliest, 2)
+	require.NoError(t, err, "Postgres rejected the earliest cursor DecodeCursor accepts")
+	require.Empty(t, page.Orders)
+
 	_, err = s.ListOrders(ctx, user.ID+1_000_000, nil, 2)
 	require.ErrorIs(t, err, store.ErrUserNotFound)
 
 	empty, err := s.CreateUser(ctx, "empty@example.com", "Nobody")
 	require.NoError(t, err)
-	page, err := s.ListOrders(ctx, empty.ID, nil, 0)
+	page, err = s.ListOrders(ctx, empty.ID, nil, 0)
 	require.NoError(t, err)
 	require.Empty(t, page.Orders)
 	require.Nil(t, page.Next)

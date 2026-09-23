@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/mail"
 	"net/netip"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -75,6 +76,10 @@ func (h *handler) createUser(w http.ResponseWriter, r *http.Request) {
 	name := strings.TrimSpace(req.Name)
 	if name == "" || utf8.RuneCountInString(name) > maxNameLength {
 		h.writeError(w, r, http.StatusUnprocessableEntity, fmt.Sprintf("name must be 1 to %d characters", maxNameLength))
+		return
+	}
+	if strings.ContainsRune(name, 0) {
+		h.writeError(w, r, http.StatusUnprocessableEntity, "name must not contain NUL characters")
 		return
 	}
 
@@ -209,6 +214,8 @@ func validateItems(items []itemPayload) error {
 		switch {
 		case strings.TrimSpace(it.SKU) == "":
 			return fmt.Errorf("items[%d].sku must not be empty", i)
+		case strings.ContainsRune(it.SKU, 0):
+			return fmt.Errorf("items[%d].sku must not contain NUL characters", i)
 		case it.Quantity <= 0:
 			return fmt.Errorf("items[%d].quantity must be positive", i)
 		case it.UnitPriceCents < 0:
@@ -226,7 +233,27 @@ func clientIP(trustedProxies []netip.Prefix) func(http.Handler) http.Handler {
 	for _, p := range trustedProxies {
 		prefixes = append(prefixes, p.String())
 	}
-	return middleware.ClientIPFromXFF(prefixes...)
+	fromXFF := middleware.ClientIPFromXFF(prefixes...)
+
+	return func(next http.Handler) http.Handler {
+		proxied, direct := fromXFF(next), middleware.ClientIPFromRemoteAddr(next)
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if fromTrustedProxy(r.RemoteAddr, trustedProxies) {
+				proxied.ServeHTTP(w, r)
+				return
+			}
+			direct.ServeHTTP(w, r)
+		})
+	}
+}
+
+func fromTrustedProxy(remoteAddr string, trustedProxies []netip.Prefix) bool {
+	peer, err := netip.ParseAddrPort(remoteAddr)
+	if err != nil {
+		return false
+	}
+	addr := peer.Addr().Unmap().WithZone("")
+	return slices.ContainsFunc(trustedProxies, func(p netip.Prefix) bool { return p.Contains(addr) })
 }
 
 func logRequests(logger *slog.Logger) func(http.Handler) http.Handler {
