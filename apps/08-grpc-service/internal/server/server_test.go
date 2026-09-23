@@ -6,6 +6,8 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -355,4 +357,77 @@ func TestShutdownCancelsCallsAfterTimeout(t *testing.T) {
 	defer cancel()
 	require.ErrorIs(t, srv.Shutdown(ctx), context.DeadlineExceeded)
 	require.Equal(t, codes.Unavailable, status.Code(<-callErr))
+}
+
+func TestReleaseReservation(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		prior    int
+		id       string
+		wantCode codes.Code
+	}{
+		{name: "released", id: "r1"},
+		{name: "released again", prior: 1, id: "r1"},
+		{name: "missing reservation id", wantCode: codes.InvalidArgument},
+		{name: "reservation id too long", id: strings.Repeat("r", 129), wantCode: codes.InvalidArgument},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			client := dial(t, newStore(t), time.Second)
+			_, err := client.Reserve(t.Context(), &inventoryv1.ReserveRequest{
+				ReservationId: "r1",
+				Lines:         []*inventoryv1.ReservationLine{{Sku: "BOOK-1", Quantity: 2}},
+			})
+			require.NoError(t, err)
+			req := &inventoryv1.ReleaseReservationRequest{ReservationId: tt.id}
+			for range tt.prior {
+				_, err := client.ReleaseReservation(t.Context(), req)
+				require.NoError(t, err)
+			}
+
+			resp, err := client.ReleaseReservation(t.Context(), req)
+			require.Equal(t, tt.wantCode, status.Code(err), "error: %v", err)
+			if tt.wantCode != codes.OK {
+				return
+			}
+			require.Equal(t, tt.id, resp.GetReservation().GetId())
+			require.NotNil(t, resp.GetReservation().GetReleaseTime())
+
+			got, err := client.GetItem(t.Context(), &inventoryv1.GetItemRequest{Sku: "BOOK-1"})
+			require.NoError(t, err)
+			want := &inventoryv1.Item{Sku: "BOOK-1", Name: "Book one", Available: 3}
+			require.True(t, proto.Equal(want, got.GetItem()), "got %v", got.GetItem())
+		})
+	}
+}
+
+func TestReleaseReservationConcurrentRetries(t *testing.T) {
+	t.Parallel()
+	client := dial(t, newStore(t), time.Second)
+	_, err := client.Reserve(t.Context(), &inventoryv1.ReserveRequest{
+		ReservationId: "r1",
+		Lines:         []*inventoryv1.ReservationLine{{Sku: "BOOK-1", Quantity: 2}},
+	})
+	require.NoError(t, err)
+
+	const retries = 20
+	errs := make([]error, retries)
+	var wg sync.WaitGroup
+	for i := range retries {
+		wg.Go(func() {
+			_, errs[i] = client.ReleaseReservation(t.Context(), &inventoryv1.ReleaseReservationRequest{ReservationId: "r1"})
+		})
+		wg.Wait()
+	}
+
+	for _, err := range errs {
+		require.NoError(t, err)
+	}
+	got, err := client.GetItem(t.Context(), &inventoryv1.GetItemRequest{Sku: "BOOK-1"})
+	require.NoError(t, err)
+	want := &inventoryv1.Item{Sku: "BOOK-1", Name: "Book one", Available: 3}
+	require.True(t, proto.Equal(want, got.GetItem()), "got %v", got.GetItem())
 }

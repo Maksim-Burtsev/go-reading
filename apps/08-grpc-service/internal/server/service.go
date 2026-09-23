@@ -77,6 +77,14 @@ func (s *service) Reserve(ctx context.Context, req *inventoryv1.ReserveRequest) 
 	return &inventoryv1.ReserveResponse{Reservation: toProtoReservation(r)}, nil
 }
 
+func (s *service) ReleaseReservation(ctx context.Context, req *inventoryv1.ReleaseReservationRequest) (*inventoryv1.ReleaseReservationResponse, error) {
+	r, err := s.inv.Release(ctx, req.GetReservationId())
+	if err != nil {
+		return nil, toStatus(err)
+	}
+	return &inventoryv1.ReleaseReservationResponse{Reservation: toProtoReservation(r)}, nil
+}
+
 func toStatus(err error) error {
 	var code codes.Code
 	switch {
@@ -113,8 +121,9 @@ func toProtoReservation(r inventory.Reservation) *inventoryv1.Reservation {
 		lines = append(lines, &inventoryv1.ReservationLine{Sku: l.SKU, Quantity: l.Quantity})
 	}
 	return &inventoryv1.Reservation{
-		Id:         r.ID,
-		Lines:      lines,
-		CreateTime: timestamppb.New(r.CreatedAt),
+		Id:          r.ID,
+		Lines:       lines,
+		CreateTime:  timestamppb.New(r.CreatedAt),
+		ReleaseTime: timestamppb.New(r.ReleasedAt),
 	}
 }

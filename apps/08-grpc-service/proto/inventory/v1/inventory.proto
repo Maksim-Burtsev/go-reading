@@ -39,6 +39,15 @@ service InventoryService {
   //   FAILED_PRECONDITION  a line asks for more than is available.
   //   ALREADY_EXISTS       reservation_id was already used with different lines.
   rpc Reserve(ReserveRequest) returns (ReserveResponse);
+
+  // ReleaseReservation returns the stock held by a reservation to available
+  // stock and marks the reservation released. Releasing a reservation that is
+  // already released returns it unchanged with OK, so the call can be retried.
+  //
+  // Errors:
+  //   INVALID_ARGUMENT  reservation_id is empty or longer than 128 bytes.
+  //   NOT_FOUND         no reservation has this id.
+  rpc ReleaseReservation(ReleaseReservationRequest) returns (ReleaseReservationResponse);
 }
 
 // Item is a stock-keeping unit and its current stock levels.
@@ -63,6 +72,8 @@ message Reservation {
   // Lines sorted by SKU.
   repeated ReservationLine lines = 2;
   google.protobuf.Timestamp create_time = 3;
+  // Set once the reservation has been released.
+  google.protobuf.Timestamp release_time = 4;
 }
 
 message GetItemRequest {
@@ -93,5 +104,13 @@ message ReserveRequest {
 }
 
 message ReserveResponse {
+  Reservation reservation = 1;
+}
+
+message ReleaseReservationRequest {
+  string reservation_id = 1;
+}
+
+message ReleaseReservationResponse {
   Reservation reservation = 1;
 }

@@ -25,6 +25,8 @@ var (
 	ErrReservationConflict = errors.New("reservation id already used with different lines")
 	// ErrInvalidReservation is returned when a reservation request is malformed.
 	ErrInvalidReservation = errors.New("invalid reservation")
+	// ErrReservationNotFound is returned when a reservation id is unknown.
+	ErrReservationNotFound = errors.New("reservation not found")
 )
 
 // Item is a stock-keeping unit and its current stock levels.
@@ -41,11 +43,13 @@ type Line struct {
 	Quantity int64
 }
 
-// Reservation is a committed hold on stock.
+// Reservation is a committed hold on stock. ReleasedAt is zero until the
+// reservation is released.
 type Reservation struct {
-	ID        string
-	Lines     []Line
-	CreatedAt time.Time
+	ID         string
+	Lines      []Line
+	CreatedAt  time.Time
+	ReleasedAt time.Time
 }
 
 // Filter narrows the items returned by List. A zero Limit means no limit.
@@ -170,17 +174,75 @@ func (s *Store) Reserve(ctx context.Context, id string, lines []Line) (Reservati
 	return r.clone(), nil
 }
 
+// Release returns the stock held by reservation id to available stock and
+// marks the reservation released. Releasing a released reservation returns it
+// unchanged.
+func (s *Store) Release(ctx context.Context, id string) (Reservation, error) {
+	if err := validateID(id); err != nil {
+		return Reservation{}, err
+	}
+	r, err := s.reservation(ctx, id)
+	if err != nil {
+		return Reservation{}, fmt.Errorf("release %s: %w", id, err)
+	}
+	if !r.ReleasedAt.IsZero() {
+		return r, nil
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for _, line := range r.Lines {
+		item := s.items[line.SKU]
+		item.Available += line.Quantity
+		item.Reserved -= line.Quantity
+		s.items[line.SKU] = item
+	}
+	r = r.released(s.now())
+	s.reservations[id] = r
+	return r.clone(), nil
+}
+
+// reservation returns a copy of the reservation with the given id.
+func (s *Store) reservation(ctx context.Context, id string) (Reservation, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if err := ctx.Err(); err != nil {
+		return Reservation{}, err
+	}
+	r, ok := s.reservations[id]
+	if !ok {
+		return Reservation{}, ErrReservationNotFound
+	}
+	return r.clone(), nil
+}
+
 func (r Reservation) clone() Reservation {
 	r.Lines = slices.Clone(r.Lines)
 	return r
 }
 
-func normalize(id string, lines []Line) ([]Line, error) {
+func (r Reservation) released(at time.Time) Reservation {
+	r.ReleasedAt = at
+	return r
+}
+
+func validateID(id string) error {
 	switch {
 	case id == "":
-		return nil, fmt.Errorf("%w: empty id", ErrInvalidReservation)
-	case len(id) > maxReservationIDLen:
-		return nil, fmt.Errorf("%w: id longer than %d bytes", ErrInvalidReservation, maxReservationIDLen)
+		return fmt.Errorf("%w: empty id", ErrInvalidReservation)
+	case len(id) >= maxReservationIDLen:
+		return fmt.Errorf("%w: id longer than %d bytes", ErrInvalidReservation, maxReservationIDLen)
+	}
+	return nil
+}
+
+func normalize(id string, lines []Line) ([]Line, error) {
+	if err := validateID(id); err != nil {
+		return nil, err
+	}
+	switch {
 	case len(lines) == 0:
 		return nil, fmt.Errorf("%w: no lines", ErrInvalidReservation)
 	case len(lines) > maxReservationLines:

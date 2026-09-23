@@ -26,6 +26,7 @@ type Inventory interface {
 	Get(ctx context.Context, sku string) (inventory.Item, error)
 	List(ctx context.Context, f inventory.Filter) ([]inventory.Item, error)
 	Reserve(ctx context.Context, id string, lines []inventory.Line) (inventory.Reservation, error)
+	Release(ctx context.Context, id string) (inventory.Reservation, error)
 }
 
 // Server is a gRPC server exposing the inventory service, health checks and reflection.
