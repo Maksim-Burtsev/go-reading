@@ -18,7 +18,6 @@ func TestBatcher(t *testing.T) {
 		size     int
 		arrivals []time.Duration
 		checkAt  time.Duration
-		wantFull bool
 		wantDue  bool
 		wantRoom int
 	}{
@@ -39,7 +38,6 @@ func TestBatcher(t *testing.T) {
 			name:     "full batch is due at once",
 			size:     3,
 			arrivals: []time.Duration{0, 0, 0},
-			wantFull: true,
 			wantDue:  true,
 		},
 		{
@@ -64,12 +62,10 @@ func TestBatcher(t *testing.T) {
 			t.Parallel()
 
 			b := batch.New[int](tt.size, time.Second)
-			var full bool
 			for i, at := range tt.arrivals {
-				full = b.Add(start.Add(at), i)
+				b.Add(start.Add(at), i)
 			}
 
-			require.Equal(t, tt.wantFull, full)
 			require.Equal(t, tt.wantDue, b.Due(start.Add(tt.checkAt)))
 			require.Equal(t, tt.wantRoom, b.Room())
 			require.Equal(t, len(tt.arrivals), b.Len())

@@ -131,7 +131,7 @@ func createTopics(ctx context.Context, adm *kadm.Client, topics ...string) error
 		return fmt.Errorf("create topics: %w", err)
 	}
 	for _, r := range resps.Sorted() {
-		if r.Err != nil && !errors.Is(r.Err, kerr.TopicAlreadyExists) {
+		if r.Err != nil && !errors.Is(r.Err, kerr.TopicAlreadyExists) && !errors.Is(r.Err, kerr.TopicAuthorizationFailed) {
 			return fmt.Errorf("create topic %s: %w", r.Topic, r.Err)
 		}
 	}

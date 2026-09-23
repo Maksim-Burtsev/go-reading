@@ -23,13 +23,12 @@ func New[T any](size int, timeout time.Duration) *Batcher[T] {
 	}
 }
 
-// Add appends an item received at now and reports whether the batch is full.
-func (b *Batcher[T]) Add(now time.Time, item T) bool {
+// Add appends an item received at now.
+func (b *Batcher[T]) Add(now time.Time, item T) {
 	if len(b.items) == 0 {
 		b.deadline = now.Add(b.timeout)
 	}
 	b.items = append(b.items, item)
-	return len(b.items) >= b.size
 }
 
 // Len returns the number of pending items.
