@@ -27,14 +27,17 @@ var (
 	errClickHouseDown = errors.New("clickhouse down")
 	errPostgresDown   = errors.New("postgres down")
 	errBroker         = errors.New("broker unavailable")
+	errCoordinator    = errors.New("coordinator not available")
 )
 
 type fakeClient struct {
-	queue      []*kgo.Record
-	stop       context.CancelFunc
-	produceErr error
-	produced   []*kgo.Record
-	commits    [][]string
+	queue          []*kgo.Record
+	stop           context.CancelFunc
+	produceErr     error
+	produced       []*kgo.Record
+	commitFailures int
+	commitCalls    int
+	commits        [][]string
 }
 
 func (f *fakeClient) PollRecords(ctx context.Context, maxPollRecords int) kgo.Fetches {
@@ -64,6 +67,10 @@ func (f *fakeClient) ProduceSync(_ context.Context, rs ...*kgo.Record) kgo.Produ
 }
 
 func (f *fakeClient) CommitRecords(_ context.Context, rs ...*kgo.Record) error {
+	f.commitCalls++
+	if f.commitCalls <= f.commitFailures {
+		return errCoordinator
+	}
 	var positions []string
 	for _, r := range rs {
 		positions = append(positions, position(r))
@@ -76,12 +83,21 @@ func (f *fakeClient) AllowRebalance() {}
 
 type fakeInserter struct {
 	failures int
+	hang     bool
 	calls    int
 	inserted []string
 }
 
-func (f *fakeInserter) InsertEvents(_ context.Context, events []event.Event) error {
+func (f *fakeInserter) InsertEvents(ctx context.Context, events []event.Event) error {
 	f.calls++
+	if f.hang {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(time.Second):
+			return errors.New("insert got no deadline")
+		}
+	}
 	if f.calls <= f.failures {
 		return errClickHouseDown
 	}
@@ -138,9 +154,12 @@ func TestPipelineRun(t *testing.T) {
 		records         []*kgo.Record
 		batchSize       int
 		retryBackoff    time.Duration
+		attemptTimeout  time.Duration
 		shutdownTimeout time.Duration
 		insertFailures  int
+		insertHangs     bool
 		ledgerFailures  int
+		commitFailures  int
 		produceErr      error
 		wantErr         error
 		wantInserted    []string
@@ -239,6 +258,22 @@ func TestPipelineRun(t *testing.T) {
 			wantMetrics: map[string]float64{"dead_letters_total/insert_failed": 2, "batches_flushed_total/dead_lettered": 1},
 		},
 		{
+			name:           "insert that hangs times out on every attempt and is dead-lettered",
+			records:        records(0, validEvent("a")),
+			attemptTimeout: 10 * time.Millisecond,
+			insertHangs:    true,
+			wantDead:       []string{"0/10"},
+			wantDeadError:  "context deadline exceeded",
+			wantBatches: []ledger.Batch{{
+				Status:       ledger.StatusDeadLettered,
+				Records:      1,
+				DeadLettered: 1,
+				Partitions:   []ledger.Partition{{Topic: topic, Partition: 0, FirstOffset: 10, LastOffset: 10, Records: 1}},
+			}},
+			wantCommits: [][]string{{"0/10"}},
+			wantMetrics: map[string]float64{"dead_letters_total/insert_failed": 1},
+		},
+		{
 			name:           "failed dead-letter produce leaves batch uncommitted",
 			records:        records(0, validEvent("a")),
 			insertFailures: 3,
@@ -265,6 +300,38 @@ func TestPipelineRun(t *testing.T) {
 			wantInserted:   []string{"a"},
 		},
 		{
+			name:           "failed commit before shutdown is logged and consumption goes on",
+			records:        records(0, validEvent("a"), validEvent("b"), validEvent("c")),
+			batchSize:      2,
+			commitFailures: 1,
+			wantInserted:   []string{"a", "b", "c"},
+			wantBatches: []ledger.Batch{
+				{
+					Status:     ledger.StatusInserted,
+					Records:    2,
+					Partitions: []ledger.Partition{{Topic: topic, Partition: 0, FirstOffset: 10, LastOffset: 11, Records: 2}},
+				},
+				{
+					Status:     ledger.StatusInserted,
+					Records:    1,
+					Partitions: []ledger.Partition{{Topic: topic, Partition: 0, FirstOffset: 12, LastOffset: 12, Records: 1}},
+				},
+			},
+			wantCommits: [][]string{{"0/12"}},
+		},
+		{
+			name:           "failed commit at shutdown fails the run",
+			records:        records(0, validEvent("a")),
+			commitFailures: 1,
+			wantErr:        errCoordinator,
+			wantInserted:   []string{"a"},
+			wantBatches: []ledger.Batch{{
+				Status:     ledger.StatusInserted,
+				Records:    1,
+				Partitions: []ledger.Partition{{Topic: topic, Partition: 0, FirstOffset: 10, LastOffset: 10, Records: 1}},
+			}},
+		},
+		{
 			name:            "shutdown timeout abandons a failing batch",
 			records:         records(0, validEvent("a")),
 			retryBackoff:    time.Hour,
@@ -280,8 +347,8 @@ func TestPipelineRun(t *testing.T) {
 			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 
-			client := &fakeClient{queue: tt.records, stop: cancel, produceErr: tt.produceErr}
-			inserter := &fakeInserter{failures: tt.insertFailures}
+			client := &fakeClient{queue: tt.records, stop: cancel, produceErr: tt.produceErr, commitFailures: tt.commitFailures}
+			inserter := &fakeInserter{failures: tt.insertFailures, hang: tt.insertHangs}
 			batches := &fakeLedger{failures: tt.ledgerFailures}
 			reg := prometheus.NewRegistry()
 			p, err := pipeline.New(client, inserter, batches, pipeline.Config{
@@ -290,6 +357,7 @@ func TestPipelineRun(t *testing.T) {
 				BatchTimeout:    time.Hour,
 				MaxAttempts:     3,
 				RetryBackoff:    tt.retryBackoff,
+				AttemptTimeout:  cmp.Or(tt.attemptTimeout, time.Minute),
 				ShutdownTimeout: cmp.Or(tt.shutdownTimeout, time.Minute),
 			}, reg, slog.New(slog.DiscardHandler))
 			require.NoError(t, err)

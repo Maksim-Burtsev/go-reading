@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
 
 	"github.com/ClickHouse/clickhouse-go/v2"
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
@@ -27,17 +28,25 @@ ORDER BY (event_type, occurred_at, event_id)`
 
 const insertEvents = `INSERT INTO events (event_id, event_type, source, occurred_at, payload)`
 
+// errInvalidDSN replaces the driver's error for a DSN that is not a URL, which
+// quotes the whole DSN, password included.
+var errInvalidDSN = errors.New("parse clickhouse dsn: not a valid URL")
+
 // Store is a ClickHouse-backed event store. It is safe for concurrent use.
 type Store struct {
 	conn driver.Conn
 }
 
 // Open connects to the ClickHouse server at dsn and creates the events table
-// if it does not exist. The table collapses rows of the same event during
-// background merges, so a replayed batch leaves one row per event.
+// if it does not exist. Rows of the same event collapse into one when
+// ClickHouse merges the parts that hold them, or at query time with FINAL;
+// until then a plain SELECT can see a replayed event twice.
 func Open(ctx context.Context, dsn string) (*Store, error) {
 	opts, err := clickhouse.ParseDSN(dsn)
 	if err != nil {
+		if _, ok := errors.AsType[*url.Error](err); ok {
+			return nil, errInvalidDSN
+		}
 		return nil, fmt.Errorf("parse clickhouse dsn: %w", err)
 	}
 	conn, err := clickhouse.Open(opts)

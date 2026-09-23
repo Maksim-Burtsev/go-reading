@@ -28,7 +28,10 @@ const (
 
 const maxBackoff = 10 * time.Second
 
-var errExhausted = errors.New("retry attempts exhausted")
+var (
+	errExhausted = errors.New("retry attempts exhausted")
+	errCommit    = errors.New("offset commit failed")
+)
 
 // Client is the part of *kgo.Client the Pipeline uses.
 type Client interface {
@@ -49,13 +52,15 @@ type Recorder interface {
 	Record(ctx context.Context, b ledger.Batch) error
 }
 
-// Config tunes batching, retries, dead-lettering and shutdown.
+// Config tunes batching, retries, dead-lettering and shutdown. AttemptTimeout
+// bounds every single call to ClickHouse, Postgres or Kafka a flush makes.
 type Config struct {
 	DeadLetterTopic string
 	BatchSize       int
 	BatchTimeout    time.Duration
 	MaxAttempts     int
 	RetryBackoff    time.Duration
+	AttemptTimeout  time.Duration
 	ShutdownTimeout time.Duration
 }
 
@@ -88,15 +93,13 @@ type metrics struct {
 }
 
 // ClientOptions returns the kgo options the Pipeline relies on: manual commits,
-// rebalances held back while a polled batch is uncommitted, and topics created
-// on first use where the brokers allow it.
+// and rebalances held back while a polled batch is uncommitted.
 func ClientOptions(group, topic string) []kgo.Opt {
 	return []kgo.Opt{
 		kgo.ConsumerGroup(group),
 		kgo.ConsumeTopics(topic),
 		kgo.DisableAutoCommit(),
 		kgo.BlockRebalanceOnPoll(),
-		kgo.AllowAutoTopicCreation(),
 	}
 }
 
@@ -134,7 +137,9 @@ func New(client Client, events Inserter, ledger Recorder, cfg Config, reg promet
 // Run consumes until ctx is done, then flushes and commits the pending batch.
 // A flush in progress, and the final one, may outlive ctx by
 // Config.ShutdownTimeout. An error means some records were left uncommitted
-// and will be delivered again.
+// and will be delivered again. A failed commit before shutdown is only logged:
+// its records are read again after a restart or rebalance unless a later
+// commit covers their partitions.
 func (p *Pipeline) Run(ctx context.Context) error {
 	flushCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	defer cancel()
@@ -146,7 +151,10 @@ func (p *Pipeline) Run(ctx context.Context) error {
 			return err
 		}
 		if len(p.pending) >= p.cfg.BatchSize || len(p.pending) > 0 && !time.Now().Before(p.deadline) {
-			if err := p.flush(flushCtx); err != nil {
+			switch err := p.flush(flushCtx); {
+			case errors.Is(err, errCommit) && ctx.Err() == nil:
+				p.logger.ErrorContext(ctx, "commit failed", "error", err)
+			case err != nil:
 				return err
 			}
 		}
@@ -240,7 +248,9 @@ func (p *Pipeline) flush(ctx context.Context) error {
 
 	batch.DeadLettered = len(dead)
 	if len(dead) > 0 {
-		if err := p.client.ProduceSync(ctx, dead...).FirstErr(); err != nil {
+		if err := p.attempt(ctx, func(ctx context.Context) error {
+			return p.client.ProduceSync(ctx, dead...).FirstErr()
+		}); err != nil {
 			return fmt.Errorf("produce %d dead letters: %w", len(dead), err)
 		}
 		p.metrics.deadLettered.WithLabelValues("invalid").Add(float64(invalid))
@@ -252,22 +262,25 @@ func (p *Pipeline) flush(ctx context.Context) error {
 	}); err != nil {
 		return fmt.Errorf("record batch: %w", err)
 	}
-	if err := p.client.CommitRecords(ctx, records...); err != nil {
-		p.logger.ErrorContext(ctx, "commit failed", "records", len(records), "error", err)
-	}
+	commitErr := p.attempt(ctx, func(ctx context.Context) error {
+		return p.client.CommitRecords(ctx, records...)
+	})
 
 	p.metrics.flushed.WithLabelValues(string(batch.Status)).Inc()
 	p.metrics.batchSize.Observe(float64(len(records)))
 	p.metrics.flushDuration.Observe(time.Since(start).Seconds())
 	p.logger.InfoContext(ctx, "batch flushed", "status", batch.Status, "records", batch.Records,
 		"dead_lettered", batch.DeadLettered, "insert_duration", batch.InsertDuration.String())
+	if commitErr != nil {
+		return fmt.Errorf("%w for %d records: %w", errCommit, len(records), commitErr)
+	}
 	return nil
 }
 
 func (p *Pipeline) retry(ctx context.Context, op string, fn func(ctx context.Context) error) error {
 	delay := p.cfg.RetryBackoff
 	for attempt := 1; ; attempt++ {
-		err := fn(ctx)
+		err := p.attempt(ctx, fn)
 		if err == nil {
 			return nil
 		}
@@ -282,6 +295,14 @@ func (p *Pipeline) retry(ctx context.Context, op string, fn func(ctx context.Con
 		}
 		delay = min(delay*2, maxBackoff)
 	}
+}
+
+// attempt calls fn with a context that expires after Config.AttemptTimeout, so
+// no single call can hold a batch, and the rebalances waiting for it, for long.
+func (p *Pipeline) attempt(ctx context.Context, fn func(ctx context.Context) error) error {
+	ctx, cancel := context.WithTimeout(ctx, p.cfg.AttemptTimeout)
+	defer cancel()
+	return fn(ctx)
 }
 
 func (p *Pipeline) deadLetter(r *kgo.Record, cause error) *kgo.Record {

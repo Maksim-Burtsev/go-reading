@@ -40,6 +40,21 @@ func TestDecode(t *testing.T) {
 		{name: "missing type", data: `{"id":"e-3","occurred_at":"2026-09-21T10:00:00Z"}`, wantErr: "missing type"},
 		{name: "missing occurred_at", data: `{"id":"e-4","type":"order.paid"}`, wantErr: "missing occurred_at"},
 		{name: "malformed occurred_at", data: `{"id":"e-5","type":"order.paid","occurred_at":"yesterday"}`, wantErr: "cannot parse"},
+		{
+			name: "earliest occurred_at",
+			data: `{"id":"e-6","type":"order.paid","occurred_at":"1900-01-01T00:00:00Z"}`,
+			want: event.Event{ID: "e-6", Type: "order.paid", OccurredAt: time.Date(1900, 1, 1, 0, 0, 0, 0, time.UTC)},
+		},
+		{
+			name:    "occurred_at before 1900",
+			data:    `{"id":"e-7","type":"order.paid","occurred_at":"1899-12-31T23:59:59Z"}`,
+			wantErr: "occurred_at is outside [1900-01-01, 2262-01-01)",
+		},
+		{
+			name:    "occurred_at from 2262",
+			data:    `{"id":"e-8","type":"order.paid","occurred_at":"2262-01-01T00:00:00Z"}`,
+			wantErr: "occurred_at is outside",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

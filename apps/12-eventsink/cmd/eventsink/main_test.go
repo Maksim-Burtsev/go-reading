@@ -22,6 +22,7 @@ func TestLoadConfig(t *testing.T) {
 		BatchTimeout:    2 * time.Second,
 		MaxAttempts:     5,
 		RetryBackoff:    200 * time.Millisecond,
+		AttemptTimeout:  3 * time.Second,
 		ShutdownTimeout: 15 * time.Second,
 	}
 	tests := []struct {
@@ -51,6 +52,7 @@ func TestLoadConfig(t *testing.T) {
 		{name: "zero batch size", env: map[string]string{"BATCH_SIZE": "0"}, wantErr: true},
 		{name: "zero batch timeout", env: map[string]string{"BATCH_TIMEOUT": "0s"}, wantErr: true},
 		{name: "zero attempts", env: map[string]string{"MAX_ATTEMPTS": "0"}, wantErr: true},
+		{name: "zero attempt timeout", env: map[string]string{"ATTEMPT_TIMEOUT": "0s"}, wantErr: true},
 		{name: "dead-letter topic equals input topic", env: map[string]string{"KAFKA_DLQ_TOPIC": "events"}, wantErr: true},
 	}
 	for _, tt := range tests {

@@ -13,36 +13,34 @@ The batching, commit and idempotency choices are recorded in
 
 ```mermaid
 flowchart LR
-    topic[("Kafka topic<br/>events")] -->|poll| consumer["Consumer group<br/>franz-go, manual commits"]
-    consumer --> batcher["Batcher<br/>BATCH_SIZE or BATCH_TIMEOUT"]
-    batcher -->|valid events| insert["Insert with retry<br/>and backoff"]
-    batcher -->|invalid JSON| dlq[("Kafka topic<br/>events.dlq")]
-    insert -->|ok| clickhouse[("ClickHouse<br/>events, ReplacingMergeTree")]
-    insert -->|MAX_ATTEMPTS exhausted| dlq
-    clickhouse --> record["Record batch"]
-    dlq --> record
-    record --> postgres[("Postgres<br/>batches")]
-    postgres --> commit["Commit offsets"]
-    commit -.->|next poll| topic
-    subgraph http ["HTTP :8012"]
-        health["GET /health"]
-        metrics["GET /metrics"]
+    subgraph kafka ["Kafka"]
+        events[("events")]
+        dlq[("events.dlq")]
     end
-    health -.->|ping| clickhouse
-    health -.->|ping| postgres
-    health -.->|ping| topic
+    subgraph eventsink ["eventsink"]
+        pipeline["Pipeline<br/>poll, batch, flush"]
+        http["HTTP :8012<br/>/health, /metrics"]
+    end
+    clickhouse[("ClickHouse<br/>events")]
+    postgres[("Postgres<br/>batches")]
+
+    events -->|poll| pipeline
+    pipeline -->|"1: insert valid events"| clickhouse
+    pipeline -->|"2: dead letters"| dlq
+    pipeline -->|"3: record the batch"| postgres
+    pipeline -->|"4: commit offsets"| kafka
+    http -.->|ping| clickhouse
+    http -.->|ping| postgres
+    http -.->|ping a broker| kafka
 ```
 
-One goroutine does all of the pipeline work: poll, batch, flush, commit. A flush runs these steps in
-order and stops at the first one that fails, leaving the batch uncommitted:
-
-1. Insert the valid events into ClickHouse in one `INSERT` block, retrying with capped exponential
-   backoff up to `MAX_ATTEMPTS` times.
-2. Produce invalid records, and the whole batch if the insert ran out of attempts, to the DLQ topic
-   with headers that point at the original topic, partition, offset and error.
-3. Insert one row into the Postgres `batches` table: status, record and dead-letter counts, insert
-   duration, and the first and last offset taken from each partition.
-4. Commit the batch's offsets.
+One goroutine runs the pipeline, and a flush takes the numbered steps in order. It stops at the first
+step that fails and leaves the batch uncommitted, so the batch is read again after a restart or a
+rebalance. The insert and the ledger write are retried with capped exponential backoff; dead letters
+are the records that do not decode, plus the whole batch once the insert has run out of attempts, and
+carry headers with the original topic, partition, offset and error. The `batches` row holds the
+status, the record and dead-letter counts, the insert duration, and the first and last offset taken
+from each partition.
 
 On `SIGTERM` the service stops polling, flushes and commits the pending batch within
 `SHUTDOWN_TIMEOUT`, stops the HTTP server, leaves the consumer group and closes ClickHouse and
@@ -51,46 +49,52 @@ Postgres.
 ## Run
 
 The compose file starts Redpanda, ClickHouse and Postgres on host ports chosen not to clash with the
-other applications in this repository. The `eventsink` service itself is behind the `app` profile.
-
-Full stack, with the service built from the [Dockerfile](Dockerfile):
+other applications in this repository. The service does not create topics, so create them once the
+broker is up:
 
 ```sh
-docker compose -f apps/12-eventsink/docker-compose.yml -p gr-12 --profile app up -d --build --wait
+export COMPOSE_FILE=apps/12-eventsink/docker-compose.yml COMPOSE_PROJECT_NAME=gr-12
+docker compose up -d --wait
+docker compose exec redpanda rpk topic create events events.dlq -X brokers=localhost:9092
 ```
 
-Infrastructure only, with the service on the host (the env defaults point at the compose ports):
+Then run the service on the host (the env defaults point at the compose ports):
 
 ```sh
-docker compose -f apps/12-eventsink/docker-compose.yml -p gr-12 up -d --wait
 go run ./apps/12-eventsink/cmd/eventsink
+```
+
+or in a container built from the [Dockerfile](Dockerfile), behind the `app` profile:
+
+```sh
+docker compose --profile app up -d --build --wait
 ```
 
 Produce events and look at the result:
 
 ```sh
-compose="docker compose -f apps/12-eventsink/docker-compose.yml -p gr-12"
 printf '%s\n' \
   '{"id":"e-1","type":"order.created","source":"checkout","occurred_at":"2026-09-21T10:00:00Z","payload":{"total":42}}' \
   '{"id":"e-1","type":"order.created","source":"checkout","occurred_at":"2026-09-21T10:00:00Z","payload":{"total":42}}' \
-  'not json' | $compose exec -T redpanda rpk topic produce events -X brokers=localhost:9092
+  'not json' | docker compose exec -T redpanda rpk topic produce events -X brokers=localhost:9092
 
-$compose exec clickhouse clickhouse-client --user eventsink --password eventsink -d eventsink \
+docker compose exec clickhouse clickhouse-client --user eventsink --password eventsink -d eventsink \
   --query 'SELECT * FROM events FINAL'
-$compose exec postgres psql -U eventsink -c 'SELECT * FROM batches ORDER BY id DESC LIMIT 5'
-$compose exec redpanda rpk topic consume events.dlq -n 1 -f '%v %h{%k=%v }\n' -X brokers=localhost:9092
-$compose exec redpanda rpk group describe eventsink -X brokers=localhost:9092
+docker compose exec postgres psql -U eventsink -c 'SELECT * FROM batches ORDER BY id DESC LIMIT 5'
+docker compose exec redpanda rpk topic consume events.dlq -n 1 -f '%v %h{%k=%v }\n' -X brokers=localhost:9092
+docker compose exec redpanda rpk group describe eventsink -X brokers=localhost:9092
 curl -s localhost:8012/health
 curl -s localhost:8012/metrics | grep ^eventsink_
 
-$compose --profile app down -v
+docker compose --profile app down -v
 ```
 
 Tests:
 
 ```sh
 go test -race ./apps/12-eventsink/...
-go test -race -tags integration ./apps/12-eventsink/...   # needs Docker
+DOCKER_HOST="$(docker context inspect --format '{{.Endpoints.docker.Host}}')" \
+  go test -race -tags integration ./apps/12-eventsink/...
 ```
 
 ## Configuration
@@ -100,22 +104,25 @@ go test -race -tags integration ./apps/12-eventsink/...   # needs Docker
 | `ADDR` | `:8012` | Listen address of the HTTP server with `/health` and `/metrics`. |
 | `KAFKA_BROKERS` | `localhost:19012` | Comma-separated seed brokers. |
 | `KAFKA_GROUP` | `eventsink` | Consumer group ID. |
-| `KAFKA_TOPIC` | `events` | Input topic. |
-| `KAFKA_DLQ_TOPIC` | `events.dlq` | Dead-letter topic; must differ from `KAFKA_TOPIC`. |
+| `KAFKA_TOPIC` | `events` | Input topic; must exist. |
+| `KAFKA_DLQ_TOPIC` | `events.dlq` | Dead-letter topic; must exist and differ from `KAFKA_TOPIC`. |
 | `CLICKHOUSE_URL` | `clickhouse://eventsink:eventsink@localhost:9012/eventsink?dial_timeout=5s&compress=lz4` | ClickHouse native-protocol DSN. |
 | `DATABASE_URL` | `postgres://eventsink:eventsink@localhost:5412/eventsink?sslmode=disable` | Postgres connection string for the batch ledger. |
 | `BATCH_SIZE` | `1000` | Records per batch; a full batch is flushed at once. |
 | `BATCH_TIMEOUT` | `2s` | Maximum time the first record of a batch waits before the batch is flushed. |
 | `MAX_ATTEMPTS` | `5` | Attempts for the ClickHouse insert and for the ledger write. |
 | `RETRY_BACKOFF` | `200ms` | Wait before the second attempt; doubled for every further attempt, capped at 10s. |
+| `ATTEMPT_TIMEOUT` | `3s` | Deadline of each insert and ledger attempt, of the dead-letter produce and of the offset commit. |
 | `SHUTDOWN_TIMEOUT` | `15s` | How long a flush may keep running after `SIGTERM`, and the HTTP shutdown deadline. |
 
-The consumer holds rebalances back while a batch is in flight, so `BATCH_TIMEOUT` plus the worst-case
-retry time must stay below the group's rebalance timeout (60 s by default). The compose service sets
-`stop_grace_period` above `SHUTDOWN_TIMEOUT` so Docker does not kill a flush in progress.
-
-Topics are expected to exist. The client asks for automatic creation, which Redpanda in dev mode (and
-any broker with `auto.create.topics.enable`) honours.
+The consumer holds rebalances back while a batch is pending, so a rebalance can wait for
+`BATCH_TIMEOUT` plus a whole flush. A flush takes at most `MAX_ATTEMPTS` × `ATTEMPT_TIMEOUT` plus the
+backoff between attempts, once for the insert and once for the ledger write, plus `ATTEMPT_TIMEOUT`
+each for the dead-letter produce and the commit. With the defaults that is 2 s + 2 × (5 × 3 s + 3 s) +
+2 × 3 s = 44 s, below the 60 s rebalance timeout kgo uses by default. Settings that push the sum past
+it let the group drop the member in the middle of a batch; the batch is then read again by the member
+that takes over its partitions. The compose service sets `stop_grace_period` above
+`SHUTDOWN_TIMEOUT` so Docker does not kill a flush in progress.
 
 ## Metrics
 

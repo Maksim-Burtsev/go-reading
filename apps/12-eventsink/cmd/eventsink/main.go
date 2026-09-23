@@ -41,6 +41,7 @@ type config struct {
 	BatchTimeout    time.Duration `env:"BATCH_TIMEOUT"    envDefault:"2s"`
 	MaxAttempts     int           `env:"MAX_ATTEMPTS"     envDefault:"5"`
 	RetryBackoff    time.Duration `env:"RETRY_BACKOFF"    envDefault:"200ms"`
+	AttemptTimeout  time.Duration `env:"ATTEMPT_TIMEOUT"  envDefault:"3s"`
 	ShutdownTimeout time.Duration `env:"SHUTDOWN_TIMEOUT" envDefault:"15s"`
 }
 
@@ -94,6 +95,7 @@ func run(ctx context.Context, _ []string, getenv func(string) string, stdout, _ 
 		BatchTimeout:    cfg.BatchTimeout,
 		MaxAttempts:     cfg.MaxAttempts,
 		RetryBackoff:    cfg.RetryBackoff,
+		AttemptTimeout:  cfg.AttemptTimeout,
 		ShutdownTimeout: cfg.ShutdownTimeout,
 	}, reg, logger)
 	if err != nil {
@@ -172,6 +174,8 @@ func loadConfig(getenv func(string) string) (config, error) {
 		return config{}, fmt.Errorf("%w: BATCH_TIMEOUT must be positive", errInvalidConfig)
 	case cfg.MaxAttempts < 1:
 		return config{}, fmt.Errorf("%w: MAX_ATTEMPTS must be positive", errInvalidConfig)
+	case cfg.AttemptTimeout <= 0:
+		return config{}, fmt.Errorf("%w: ATTEMPT_TIMEOUT must be positive", errInvalidConfig)
 	}
 	return cfg, nil
 }
