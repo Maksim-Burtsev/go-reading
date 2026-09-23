@@ -42,6 +42,7 @@ func newTestServer(t *testing.T, pinger server.Pinger) (http.Handler, *batcher.B
 	logger := slog.New(slog.DiscardHandler)
 	buf, err := batcher.New(batcher.Config{
 		BufferSize:    4,
+		MaxBytes:      1 << 20,
 		BatchSize:     2,
 		FlushInterval: time.Hour,
 		MaxAttempts:   1,
@@ -49,7 +50,7 @@ func newTestServer(t *testing.T, pinger server.Pinger) (http.Handler, *batcher.B
 	require.NoError(t, err)
 
 	now := func() time.Time { return time.Date(2026, 9, 21, 12, 0, 0, 0, time.UTC) }
-	h, err := server.NewHandler(logger, buf, pinger, reg, now)
+	h, err := server.NewHandler(logger, buf, pinger, reg, now, time.Second)
 	require.NoError(t, err)
 	return h, buf
 }
@@ -185,6 +186,7 @@ func TestMetrics(t *testing.T) {
 		"sink_events_received_total 1",
 		`sink_events_rejected_total{reason="buffer_full"} 2`,
 		"sink_buffer_length 4",
+		"sink_buffer_bytes 24",
 	} {
 		require.Contains(t, string(body), want)
 	}

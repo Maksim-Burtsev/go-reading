@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -20,7 +21,7 @@ var (
 	// ErrBufferFull is returned by Enqueue when the buffer has no room for all events.
 	ErrBufferFull = errors.New("buffer full")
 	// ErrTooLarge is returned by Enqueue when the events can never fit into the buffer.
-	ErrTooLarge = errors.New("more events than buffer capacity")
+	ErrTooLarge = errors.New("request exceeds buffer capacity")
 	// ErrClosed is returned by Enqueue once the batcher has started draining.
 	ErrClosed = errors.New("batcher closed")
 )
@@ -33,6 +34,7 @@ type Inserter interface {
 // Config controls buffering, batching and retry behaviour.
 type Config struct {
 	BufferSize    int
+	MaxBytes      int64
 	BatchSize     int
 	FlushInterval time.Duration
 	MaxAttempts   int
@@ -50,8 +52,10 @@ type Batcher struct {
 	mu     sync.Mutex
 	closed bool
 	events chan event.Event
+	bytes  atomic.Int64
 
 	batchSize     prometheus.Histogram
+	batchBytes    prometheus.Histogram
 	flushDuration prometheus.Histogram
 	flushErrors   prometheus.Counter
 	dropped       prometheus.Counter
@@ -68,6 +72,12 @@ func New(cfg Config, ins Inserter, reg prometheus.Registerer, logger *slog.Logge
 			Namespace: "sink",
 			Name:      "batch_size_events",
 			Help:      "Number of events per batch, stored or dropped.",
+			Buckets:   prometheus.ExponentialBuckets(1, 4, 8),
+		}),
+		batchBytes: prometheus.NewHistogram(prometheus.HistogramOpts{
+			Namespace: "sink",
+			Name:      "batch_size_bytes",
+			Help:      "Payload bytes per batch, stored or dropped.",
 			Buckets:   prometheus.ExponentialBuckets(1, 4, 8),
 		}),
 		flushDuration: prometheus.NewHistogram(prometheus.HistogramOpts{
@@ -92,8 +102,13 @@ func New(cfg Config, ins Inserter, reg prometheus.Registerer, logger *slog.Logge
 		Name:      "buffer_length",
 		Help:      "Events waiting in the buffer.",
 	}, func() float64 { return float64(b.Len()) })
+	bufferBytes := prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+		Namespace: "sink",
+		Name:      "buffer_bytes",
+		Help:      "Payload bytes held in memory, including the batch being flushed.",
+	}, b.bufferedBytes)
 
-	for _, c := range []prometheus.Collector{b.batchSize, b.flushDuration, b.flushErrors, b.dropped, bufferLength} {
+	for _, c := range []prometheus.Collector{b.batchSize, b.batchBytes, b.flushDuration, b.flushErrors, b.dropped, bufferLength, bufferBytes} {
 		if err := reg.Register(c); err != nil {
 			return nil, fmt.Errorf("register batcher metric: %w", err)
 		}
@@ -106,10 +121,18 @@ func (b *Batcher) Len() int {
 	return len(b.events)
 }
 
+func (b *Batcher) bufferedBytes() float64 {
+	return float64(b.bytes.Load())
+}
+
 // Enqueue adds all events to the buffer or none of them. It never blocks.
 func (b *Batcher) Enqueue(events []event.Event) error {
-	if len(events) > cap(b.events) {
+	size := payloadBytes(events)
+	if len(events) > cap(b.events) || size > b.cfg.MaxBytes {
 		return ErrTooLarge
+	}
+	if b.bytes.Load()+size > b.cfg.MaxBytes {
+		return ErrBufferFull
 	}
 
 	b.mu.Lock()
@@ -121,6 +144,7 @@ func (b *Batcher) Enqueue(events []event.Event) error {
 	if cap(b.events)-len(b.events) < len(events) {
 		return ErrBufferFull
 	}
+	b.bytes.Add(size)
 	for _, e := range events {
 		b.events <- e
 	}
@@ -194,11 +218,25 @@ func (b *Batcher) flush(ctx context.Context, batch []event.Event) error {
 	b.flushDuration.Observe(time.Since(start).Seconds())
 	b.batchSize.Observe(float64(len(batch)))
 
+	size := payloadBytes(batch)
+	b.batchBytes.Observe(float64(size))
 	if err != nil {
 		b.dropped.Add(float64(len(batch)))
 		b.logger.ErrorContext(ctx, "batch dropped", "events", len(batch), "error", err)
+		return err
 	}
-	return err
+	b.bytes.Add(-size)
+	return nil
+}
+
+// payloadBytes approximates the memory the events hold by the length of their
+// variable-size fields.
+func payloadBytes(events []event.Event) int64 {
+	var n int64
+	for i := range events {
+		n += int64(len(events[i].Type) + len(events[i].UserID) + len(events[i].Properties))
+	}
+	return n
 }
 
 func (b *Batcher) insertWithRetry(ctx context.Context, batch []event.Event) error {

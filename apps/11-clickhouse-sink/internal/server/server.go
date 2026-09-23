@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -19,9 +20,8 @@ import (
 )
 
 const (
-	maxBodyBytes      = 4 << 20
-	healthTimeout     = 2 * time.Second
-	retryAfterSeconds = "1"
+	maxBodyBytes  = 4 << 20
+	healthTimeout = 2 * time.Second
 )
 
 var errTrailingData = errors.New("body must contain a single JSON array")
@@ -54,8 +54,16 @@ type healthResponse struct {
 }
 
 // NewHandler builds the HTTP handler and registers its metrics with reg. now
-// is the clock that event timestamps are validated against.
-func NewHandler(logger *slog.Logger, queue Enqueuer, db Pinger, reg *prometheus.Registry, now func() time.Time) (http.Handler, error) {
+// is the clock that event timestamps are validated against, and retryAfter is
+// how long a client is asked to wait when the buffer is full.
+func NewHandler(
+	logger *slog.Logger,
+	queue Enqueuer,
+	db Pinger,
+	reg *prometheus.Registry,
+	now func() time.Time,
+	retryAfter time.Duration,
+) (http.Handler, error) {
 	m := ingestMetrics{
 		received: prometheus.NewCounter(prometheus.CounterOpts{
 			Namespace: "sink",
@@ -75,7 +83,7 @@ func NewHandler(logger *slog.Logger, queue Enqueuer, db Pinger, reg *prometheus.
 	}
 
 	mux := http.NewServeMux()
-	mux.Handle("POST /ingest", handleIngest(logger, queue, m, now))
+	mux.Handle("POST /ingest", handleIngest(logger, queue, m, now, retryAfterHeader(retryAfter)))
 	mux.Handle("GET /health", handleHealth(logger, db))
 	mux.Handle("GET /metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{Registry: reg}))
 	return mux, nil
@@ -89,13 +97,14 @@ func NewHandler(logger *slog.Logger, queue Enqueuer, db Pinger, reg *prometheus.
 //
 //   - 202 with the number of accepted events;
 //   - 400 when the body is not a single JSON array of events;
-//   - 413 when the body exceeds 4 MiB or holds more events than the buffer can ever fit;
+//   - 413 when the body exceeds 4 MiB or holds more than the buffer can ever fit;
 //   - 422 when the array is empty or any event fails validation;
-//   - 429 with Retry-After when the buffer lacks room for the whole array;
+//   - 429 with Retry-After when the buffer lacks room for the whole array,
+//     in events or in bytes;
 //   - 503 while the service is shutting down.
 //
 // A 202 means the events are buffered, not yet written to ClickHouse.
-func handleIngest(logger *slog.Logger, queue Enqueuer, m ingestMetrics, now func() time.Time) http.Handler {
+func handleIngest(logger *slog.Logger, queue Enqueuer, m ingestMetrics, now func() time.Time, retryAfter string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		events, err := decodeEvents(w, r)
 		if err != nil {
@@ -118,7 +127,7 @@ func handleIngest(logger *slog.Logger, queue Enqueuer, m ingestMetrics, now func
 			status, reason := enqueueFailure(err)
 			m.rejected.WithLabelValues(reason).Add(float64(len(events)))
 			if status == http.StatusTooManyRequests {
-				w.Header().Set("Retry-After", retryAfterSeconds)
+				w.Header().Set("Retry-After", retryAfter)
 			}
 			if status == http.StatusInternalServerError {
 				logger.ErrorContext(r.Context(), "enqueue events", "error", err)
@@ -183,6 +192,11 @@ func enqueueFailure(err error) (status int, reason string) {
 	default:
 		return http.StatusInternalServerError, "internal"
 	}
+}
+
+// retryAfterHeader renders d as a Retry-After value in whole seconds.
+func retryAfterHeader(d time.Duration) string {
+	return strconv.FormatInt(int64(d/time.Second), 10)
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

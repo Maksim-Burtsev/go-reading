@@ -1,7 +1,9 @@
 package batcher
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"slices"
@@ -50,6 +52,7 @@ func (f *fakeInserter) sizes() []int {
 func testConfig() Config {
 	return Config{
 		BufferSize:    16,
+		MaxBytes:      1 << 20,
 		BatchSize:     4,
 		FlushInterval: time.Hour,
 		MaxAttempts:   3,
@@ -245,4 +248,65 @@ func TestRunBoundsFlushInProgressOnShutdown(t *testing.T) {
 	require.NoError(t, stop())
 	require.Less(t, time.Since(begun), 10*cfg.DrainTimeout)
 	require.InDelta(t, float64(cfg.BatchSize), testutil.ToFloat64(b.dropped), 0)
+}
+
+func withPayload(n int) event.Event {
+	return event.Event{Properties: json.RawMessage(bytes.Repeat([]byte("x"), n))}
+}
+
+func TestEnqueueBytes(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		prefill   int
+		size      int
+		wantErr   error
+		wantBytes int64
+	}{
+		{name: "fits", size: 100, wantBytes: 100},
+		{name: "fills budget exactly", prefill: 900, size: 124, wantBytes: 1024},
+		{name: "over budget keeps nothing", prefill: 1000, size: 100, wantErr: ErrBufferFull, wantBytes: 1000},
+		{name: "larger than budget", size: 1025, wantErr: ErrTooLarge},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			cfg := testConfig()
+			cfg.MaxBytes = 1024
+			b := newTestBatcher(t, cfg, &fakeInserter{})
+			if tt.prefill > 0 {
+				require.NoError(t, b.Enqueue([]event.Event{withPayload(tt.prefill)}))
+			}
+
+			err := b.Enqueue([]event.Event{withPayload(tt.size)})
+			require.ErrorIs(t, err, tt.wantErr)
+			require.Equal(t, tt.wantBytes, b.bytes.Load())
+		})
+	}
+}
+
+func TestRunReleasesBytes(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		failures int
+	}{
+		{name: "after a stored batch"},
+		{name: "after a dropped batch", failures: 2},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			b := newTestBatcher(t, testConfig(), &fakeInserter{failures: tt.failures})
+			require.NoError(t, b.Enqueue([]event.Event{withPayload(64), withPayload(64)}))
+			require.Equal(t, int64(128), b.bytes.Load())
+
+			require.NoError(t, start(t, b)())
+			require.Zero(t, b.bytes.Load())
+		})
+	}
 }

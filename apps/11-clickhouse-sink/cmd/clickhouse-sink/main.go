@@ -33,6 +33,7 @@ type config struct {
 	ClickHouseUser     string        `env:"CLICKHOUSE_USER"     envDefault:"sink"`
 	ClickHousePassword string        `env:"CLICKHOUSE_PASSWORD" envDefault:"sink"`
 	BufferSize         int           `env:"BUFFER_SIZE"         envDefault:"100000"`
+	BufferMaxBytes     int64         `env:"BUFFER_MAX_BYTES"    envDefault:"268435456"`
 	BatchSize          int           `env:"BATCH_SIZE"          envDefault:"10000"`
 	FlushInterval      time.Duration `env:"FLUSH_INTERVAL"      envDefault:"1s"`
 	FlushMaxAttempts   int           `env:"FLUSH_MAX_ATTEMPTS"  envDefault:"3"`
@@ -88,6 +89,7 @@ func run(ctx context.Context, _ []string, getenv func(string) string, stdout, _ 
 
 	buf, err := batcher.New(batcher.Config{
 		BufferSize:    cfg.BufferSize,
+		MaxBytes:      cfg.BufferMaxBytes,
 		BatchSize:     cfg.BatchSize,
 		FlushInterval: cfg.FlushInterval,
 		MaxAttempts:   cfg.FlushMaxAttempts,
@@ -98,7 +100,7 @@ func run(ctx context.Context, _ []string, getenv func(string) string, stdout, _ 
 		return err
 	}
 
-	handler, err := server.NewHandler(logger, buf, store, reg, time.Now)
+	handler, err := server.NewHandler(logger, buf, store, reg, time.Now, cfg.FlushInterval)
 	if err != nil {
 		return err
 	}
@@ -183,6 +185,8 @@ func loadConfig(getenv func(string) string) (config, error) {
 	switch {
 	case cfg.BatchSize <= 0:
 		return config{}, fmt.Errorf("%w: BATCH_SIZE must be positive", errInvalidConfig)
+	case cfg.BufferMaxBytes <= 0:
+		return config{}, fmt.Errorf("%w: BUFFER_MAX_BYTES must be positive", errInvalidConfig)
 	case cfg.BufferSize < cfg.BatchSize:
 		return config{}, fmt.Errorf("%w: BUFFER_SIZE must be at least BATCH_SIZE", errInvalidConfig)
 	case cfg.FlushInterval <= 0:
