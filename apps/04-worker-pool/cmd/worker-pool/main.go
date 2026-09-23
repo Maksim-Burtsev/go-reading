@@ -28,6 +28,7 @@ type config struct {
 	Workers         int           `env:"WORKERS" envDefault:"8"`
 	QueueSize       int           `env:"QUEUE_SIZE" envDefault:"1024"`
 	MaxAttempts     int           `env:"MAX_ATTEMPTS" envDefault:"5"`
+	MaxPerHost      int           `env:"MAX_PER_HOST" envDefault:"2"`
 	BackoffBase     time.Duration `env:"BACKOFF_BASE" envDefault:"500ms"`
 	BackoffMax      time.Duration `env:"BACKOFF_MAX" envDefault:"30s"`
 	AttemptTimeout  time.Duration `env:"ATTEMPT_TIMEOUT" envDefault:"10s"`
@@ -47,6 +48,9 @@ func (c config) validate() error {
 	}
 	if c.MaxAttempts < 1 {
 		errs = append(errs, fmt.Errorf("MAX_ATTEMPTS must be at least 1, got %d", c.MaxAttempts))
+	}
+	if c.MaxPerHost < 0 {
+		errs = append(errs, fmt.Errorf("MAX_PER_HOST must not be negative, got %d", c.MaxPerHost))
 	}
 	if c.BackoffBase <= 0 || c.BackoffMax < c.BackoffBase {
 		errs = append(errs, fmt.Errorf("need 0 < BACKOFF_BASE <= BACKOFF_MAX, got %s and %s", c.BackoffBase, c.BackoffMax))
@@ -111,6 +115,7 @@ func run(ctx context.Context, _ []string, getenv func(string) string, stdout, _ 
 	pool := dispatch.NewPool(newClient(), dispatch.Config{
 		Workers:        cfg.Workers,
 		MaxAttempts:    cfg.MaxAttempts,
+		MaxPerHost:     cfg.MaxPerHost,
 		AttemptTimeout: cfg.AttemptTimeout,
 		Backoff:        backoff.Policy{Base: cfg.BackoffBase, Max: cfg.BackoffMax},
 	}, logger)

@@ -19,8 +19,11 @@ const maxDrainBytes = 64 << 10
 
 // Config tunes the concurrency and retry behavior of a Pool.
 type Config struct {
-	Workers        int
-	MaxAttempts    int
+	Workers     int
+	MaxAttempts int
+	// MaxPerHost caps the attempts in flight to one target host. Zero means
+	// no limit.
+	MaxPerHost     int
 	AttemptTimeout time.Duration
 	Backoff        backoff.Policy
 }
@@ -30,6 +33,7 @@ type Pool struct {
 	client  *http.Client
 	cfg     Config
 	logger  *slog.Logger
+	hosts   *hostLimiter
 	results chan Result
 }
 
@@ -39,6 +43,7 @@ func NewPool(client *http.Client, cfg Config, logger *slog.Logger) *Pool {
 		client:  client,
 		cfg:     cfg,
 		logger:  logger,
+		hosts:   newHostLimiter(cfg.MaxPerHost),
 		results: make(chan Result, cfg.Workers),
 	}
 }
@@ -77,6 +82,7 @@ func (p *Pool) deliver(ctx context.Context, t Task) Result {
 	if err := ctx.Err(); err != nil {
 		return Result{TaskID: t.ID, Status: StatusCanceled, Err: err}
 	}
+	host := hostOf(t.URL)
 
 	var err error
 	for attempt := range p.cfg.MaxAttempts {
@@ -88,6 +94,13 @@ func (p *Pool) deliver(ctx context.Context, t Task) Result {
 				return Result{TaskID: t.ID, Status: StatusCanceled, Attempts: attempt, Err: err}
 			}
 		}
+
+		var release func()
+		release, err = p.hosts.acquire(ctx, host)
+		if err != nil {
+			return Result{TaskID: t.ID, Status: StatusCanceled, Attempts: attempt, Err: err}
+		}
+		defer release()
 
 		err = p.attempt(ctx, t)
 		switch {

@@ -29,6 +29,7 @@ func testConfig() dispatch.Config {
 	return dispatch.Config{
 		Workers:        2,
 		MaxAttempts:    3,
+		MaxPerHost:     4,
 		AttemptTimeout: time.Second,
 		Backoff: backoff.Policy{
 			Base: time.Millisecond,
@@ -283,4 +284,36 @@ func TestPoolDrainsQueueOnClose(t *testing.T) {
 	require.NoError(t, <-errc)
 	require.Equal(t, 6, delivered)
 	require.LessOrEqual(t, int(peak.Load()), cfg.Workers)
+}
+
+func TestPoolLimitsConcurrencyPerHost(t *testing.T) {
+	t.Parallel()
+
+	var inFlight, peak atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		n := inFlight.Add(1)
+		defer inFlight.Add(-1)
+		for {
+			p := peak.Load()
+			if n <= p || peak.CompareAndSwap(p, n) {
+				break
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+
+	cfg := testConfig()
+	cfg.MaxPerHost = 2
+	q := newQueue(t, srv, 6)
+	q.Close()
+
+	results, err := collect(t.Context(), newPool(srv, cfg), q.Tasks())
+	require.NoError(t, err)
+	require.Len(t, results, 6)
+	for id, res := range results {
+		require.Equal(t, dispatch.StatusDelivered, res.Status, id)
+	}
+	require.LessOrEqual(t, int(peak.Load()), cfg.MaxPerHost)
 }
