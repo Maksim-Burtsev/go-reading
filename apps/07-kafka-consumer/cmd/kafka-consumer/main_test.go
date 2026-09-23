@@ -17,6 +17,7 @@ func TestLoadConfig(t *testing.T) {
 		DeadLetterTopic: "events.dlq",
 		BatchSize:       100,
 		BatchTimeout:    time.Second,
+		PendingBatches:  2,
 		MaxAttempts:     3,
 		ShutdownTimeout: 10 * time.Second,
 	}
@@ -43,6 +44,7 @@ func TestLoadConfig(t *testing.T) {
 		{name: "malformed duration", env: map[string]string{"BATCH_TIMEOUT": "soon"}, wantErr: true},
 		{name: "zero batch size", env: map[string]string{"BATCH_SIZE": "0"}, wantErr: true},
 		{name: "zero attempts", env: map[string]string{"MAX_ATTEMPTS": "0"}, wantErr: true},
+		{name: "zero pending batches", env: map[string]string{"PENDING_BATCHES": "0"}, wantErr: true},
 		{name: "dead-letter topic equals input topic", env: map[string]string{"KAFKA_DLQ_TOPIC": "events"}, wantErr: true},
 	}
 	for _, tt := range tests {

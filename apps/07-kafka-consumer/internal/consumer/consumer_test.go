@@ -29,11 +29,13 @@ var (
 )
 
 type fakeClient struct {
-	queue      []*kgo.Record
-	stop       context.CancelFunc
-	produceErr error
-	produced   []*kgo.Record
-	commits    [][]int64
+	queue           []*kgo.Record
+	stop            context.CancelFunc
+	produceErr      error
+	produceFailures int
+	produceCalls    int
+	produced        []*kgo.Record
+	commits         [][]int64
 }
 
 func (f *fakeClient) PollRecords(ctx context.Context, maxPollRecords int) kgo.Fetches {
@@ -52,11 +54,16 @@ func (f *fakeClient) PollRecords(ctx context.Context, maxPollRecords int) kgo.Fe
 }
 
 func (f *fakeClient) ProduceSync(_ context.Context, rs ...*kgo.Record) kgo.ProduceResults {
+	f.produceCalls++
+	err := f.produceErr
+	if f.produceCalls <= f.produceFailures {
+		err = errBroker
+	}
 	results := make(kgo.ProduceResults, 0, len(rs))
 	for _, r := range rs {
-		results = append(results, kgo.ProduceResult{Record: r, Err: f.produceErr})
+		results = append(results, kgo.ProduceResult{Record: r, Err: err})
 	}
-	if f.produceErr == nil {
+	if err == nil {
 		f.produced = append(f.produced, rs...)
 	}
 	return results
@@ -75,11 +82,13 @@ func (f *fakeClient) AllowRebalance() {}
 
 type fakeSink struct {
 	failures int
+	delay    time.Duration
 	calls    int
 	written  []string
 }
 
 func (s *fakeSink) Write(_ context.Context, events []event.Event) error {
+	time.Sleep(s.delay)
 	s.calls++
 	if s.calls <= s.failures {
 		return errSinkDown
@@ -104,7 +113,9 @@ func TestConsumerRun(t *testing.T) {
 		retryDelay      time.Duration
 		shutdownTimeout time.Duration
 		sinkFailures    int
+		sinkDelay       time.Duration
 		produceErr      error
+		produceFailures int
 		wantErr         bool
 		wantSinkCalls   int
 		wantWritten     []string
@@ -126,6 +137,15 @@ func TestConsumerRun(t *testing.T) {
 			wantSinkCalls: 3,
 			wantWritten:   []string{"a", "b", "c", "d", "e"},
 			wantCommits:   [][]int64{{0, 1}, {2, 3}, {4}},
+		},
+		{
+			name:          "next batch is polled while the previous one is written",
+			values:        []string{validEvent("a"), validEvent("b"), validEvent("c"), validEvent("d")},
+			batchSize:     2,
+			sinkDelay:     20 * time.Millisecond,
+			wantSinkCalls: 2,
+			wantWritten:   []string{"a", "b", "c", "d"},
+			wantCommits:   [][]int64{{0, 1}, {2, 3}},
 		},
 		{
 			name:          "invalid json skips the sink",
@@ -162,6 +182,17 @@ func TestConsumerRun(t *testing.T) {
 			wantSinkCalls: 3,
 		},
 		{
+			name:            "a failed flush does not stop the consumer",
+			values:          []string{validEvent("a"), validEvent("b"), validEvent("c"), validEvent("d")},
+			batchSize:       2,
+			sinkFailures:    3,
+			produceFailures: 1,
+			wantErr:         true,
+			wantSinkCalls:   4,
+			wantWritten:     []string{"c", "d"},
+			wantCommits:     [][]int64{{2, 3}},
+		},
+		{
 			name:            "shutdown timeout abandons a failing batch",
 			values:          []string{validEvent("a")},
 			retryDelay:      time.Hour,
@@ -178,7 +209,7 @@ func TestConsumerRun(t *testing.T) {
 			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 
-			client := &fakeClient{stop: cancel, produceErr: tt.produceErr}
+			client := &fakeClient{stop: cancel, produceErr: tt.produceErr, produceFailures: tt.produceFailures}
 			for i, v := range tt.values {
 				client.queue = append(client.queue, &kgo.Record{
 					Topic:   topic,
@@ -188,7 +219,7 @@ func TestConsumerRun(t *testing.T) {
 					Headers: []kgo.RecordHeader{{Key: "trace-id", Value: []byte("t-1")}},
 				})
 			}
-			sink := &fakeSink{failures: tt.sinkFailures}
+			sink := &fakeSink{failures: tt.sinkFailures, delay: tt.sinkDelay}
 			cfg := consumer.Config{
 				DeadLetterTopic: dlqTopic,
 				BatchSize:       cmp.Or(tt.batchSize, 100),

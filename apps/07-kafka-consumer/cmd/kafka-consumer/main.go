@@ -37,6 +37,7 @@ type config struct {
 	DeadLetterTopic string        `env:"KAFKA_DLQ_TOPIC" envDefault:"events.dlq"`
 	BatchSize       int           `env:"BATCH_SIZE" envDefault:"100"`
 	BatchTimeout    time.Duration `env:"BATCH_TIMEOUT" envDefault:"1s"`
+	PendingBatches  int           `env:"PENDING_BATCHES" envDefault:"2"`
 	MaxAttempts     int           `env:"MAX_ATTEMPTS" envDefault:"3"`
 	ShutdownTimeout time.Duration `env:"SHUTDOWN_TIMEOUT" envDefault:"10s"`
 }
@@ -80,6 +81,7 @@ func run(ctx context.Context, _ []string, getenv func(string) string, stdout, st
 			DeadLetterTopic: cfg.DeadLetterTopic,
 			BatchSize:       cfg.BatchSize,
 			BatchTimeout:    cfg.BatchTimeout,
+			PendingBatches:  cfg.PendingBatches,
 			ShutdownTimeout: cfg.ShutdownTimeout,
 		},
 		logger,
@@ -119,6 +121,8 @@ func loadConfig(getenv func(string) string) (config, error) {
 		return config{}, fmt.Errorf("%w: BATCH_SIZE must be positive", errInvalidConfig)
 	case cfg.BatchTimeout <= 0:
 		return config{}, fmt.Errorf("%w: BATCH_TIMEOUT must be positive", errInvalidConfig)
+	case cfg.PendingBatches < 1:
+		return config{}, fmt.Errorf("%w: PENDING_BATCHES must be positive", errInvalidConfig)
 	case cfg.MaxAttempts < 1:
 		return config{}, fmt.Errorf("%w: MAX_ATTEMPTS must be positive", errInvalidConfig)
 	}

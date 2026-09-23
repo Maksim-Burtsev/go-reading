@@ -3,6 +3,7 @@
 package consumer
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -17,6 +18,8 @@ import (
 	"github.com/Maksim-Burtsev/go-reading/apps/07-kafka-consumer/internal/event"
 	"github.com/Maksim-Burtsev/go-reading/apps/07-kafka-consumer/internal/retry"
 )
+
+const defaultPendingBatches = 2
 
 // Headers added to every record produced to the dead-letter topic.
 const (
@@ -45,6 +48,9 @@ type Config struct {
 	DeadLetterTopic string
 	BatchSize       int
 	BatchTimeout    time.Duration
+	// PendingBatches is how many full batches may wait for the flusher while
+	// the next one is polled. Zero means 2.
+	PendingBatches  int
 	ShutdownTimeout time.Duration
 }
 
@@ -83,6 +89,7 @@ func ClientOptions(group, topic string, logger *slog.Logger) []kgo.Opt {
 
 // New returns a Consumer. The client must be created with ClientOptions.
 func New(client Client, sink Sink, policy retry.Policy, cfg Config, logger *slog.Logger) *Consumer {
+	cfg.PendingBatches = cmp.Or(cfg.PendingBatches, defaultPendingBatches)
 	return &Consumer{
 		client: client,
 		sink:   sink,
@@ -94,19 +101,29 @@ func New(client Client, sink Sink, policy retry.Policy, cfg Config, logger *slog
 }
 
 // Run consumes until ctx is done, then flushes and commits the pending batch
-// within Config.ShutdownTimeout. An error means some records were left
-// uncommitted and will be delivered again.
+// within Config.ShutdownTimeout. Full batches are written by a background
+// goroutine while the next one is polled. An error means some records were
+// left uncommitted and will be delivered again.
 func (c *Consumer) Run(ctx context.Context) error {
 	flushCtx, cancel := withGrace(ctx, c.cfg.ShutdownTimeout)
 	defer cancel()
 
+	batches := make(chan []pending, c.cfg.PendingBatches)
+	flushed := make(chan error, 1)
+	go func() {
+		flushed <- c.flushLoop(flushCtx, batches)
+	}()
+
 	for ctx.Err() == nil {
 		if err := c.poll(ctx); err != nil {
-			return err
+			close(batches)
+			return errors.Join(err, <-flushed)
 		}
 		if c.batch.Due(time.Now()) {
-			if err := c.flush(flushCtx); err != nil {
-				return err
+			select {
+			case batches <- c.batch.Drain():
+			default:
+				c.logger.WarnContext(ctx, "flusher is busy, keeping batch", "records", c.batch.Len())
 			}
 		}
 		if c.batch.Len() == 0 {
@@ -115,11 +132,27 @@ func (c *Consumer) Run(ctx context.Context) error {
 	}
 
 	c.logger.InfoContext(flushCtx, "flushing pending batch", "records", c.batch.Len())
-	if err := c.flush(flushCtx); err != nil {
+	batches <- c.batch.Drain()
+	close(batches)
+	if err := <-flushed; err != nil {
 		return err
 	}
 	c.client.AllowRebalance()
 	return nil
+}
+
+// flushLoop writes batches in order until the channel is closed. A failed
+// batch is logged and the loop moves on to the next one; the errors are
+// returned together once the channel is drained.
+func (c *Consumer) flushLoop(ctx context.Context, batches <-chan []pending) error {
+	var errs []error
+	for items := range batches {
+		if err := c.flush(ctx, items); err != nil {
+			c.logger.ErrorContext(ctx, "flush failed", "records", len(items), "error", err)
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
 }
 
 func (c *Consumer) poll(ctx context.Context) error {
@@ -156,8 +189,7 @@ func (c *Consumer) pollContext(ctx context.Context) (context.Context, context.Ca
 	return context.WithCancel(ctx)
 }
 
-func (c *Consumer) flush(ctx context.Context) error {
-	items := c.batch.Drain()
+func (c *Consumer) flush(ctx context.Context, items []pending) error {
 	if len(items) == 0 {
 		return nil
 	}
