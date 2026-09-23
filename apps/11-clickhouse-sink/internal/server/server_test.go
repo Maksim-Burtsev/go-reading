@@ -48,7 +48,8 @@ func newTestServer(t *testing.T, pinger server.Pinger) (http.Handler, *batcher.B
 	}, fakeInserter{}, reg, logger)
 	require.NoError(t, err)
 
-	h, err := server.NewHandler(logger, buf, pinger, reg)
+	now := func() time.Time { return time.Date(2026, 9, 21, 12, 0, 0, 0, time.UTC) }
+	h, err := server.NewHandler(logger, buf, pinger, reg, now)
 	require.NoError(t, err)
 	return h, buf
 }

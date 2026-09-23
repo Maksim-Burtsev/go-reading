@@ -14,6 +14,8 @@ import (
 const (
 	maxTypeLen   = 128
 	maxUserIDLen = 256
+	maxAge       = 30 * 24 * time.Hour
+	maxLead      = 24 * time.Hour
 )
 
 // ErrInvalid is wrapped by every validation error returned from Validate.
@@ -28,8 +30,9 @@ type Event struct {
 	Properties json.RawMessage `json:"properties,omitempty"`
 }
 
-// Validate reports whether the event can be stored.
-func (e *Event) Validate() error {
+// Validate reports whether the event can be stored when it arrives at now:
+// ts must lie within the 30 days before now and at most a day after it.
+func (e *Event) Validate(now time.Time) error {
 	switch {
 	case e.ID == uuid.Nil:
 		return fmt.Errorf("%w: event_id is required", ErrInvalid)
@@ -43,6 +46,10 @@ func (e *Event) Validate() error {
 		return fmt.Errorf("%w: user_id exceeds %d bytes", ErrInvalid, maxUserIDLen)
 	case e.Timestamp.IsZero():
 		return fmt.Errorf("%w: ts is required", ErrInvalid)
+	case e.Timestamp.Before(now.Add(-maxAge)):
+		return fmt.Errorf("%w: ts is more than 30 days old", ErrInvalid)
+	case e.Timestamp.After(now.Add(maxLead)):
+		return fmt.Errorf("%w: ts is more than a day ahead", ErrInvalid)
 	case len(e.Properties) > 0 && !e.hasObjectProperties():
 		return fmt.Errorf("%w: properties must be a JSON object", ErrInvalid)
 	}

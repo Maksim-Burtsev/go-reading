@@ -98,7 +98,7 @@ func run(ctx context.Context, _ []string, getenv func(string) string, stdout, _ 
 		return err
 	}
 
-	handler, err := server.NewHandler(logger, buf, store, reg)
+	handler, err := server.NewHandler(logger, buf, store, reg, time.Now)
 	if err != nil {
 		return err
 	}

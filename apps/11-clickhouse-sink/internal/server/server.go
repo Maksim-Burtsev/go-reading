@@ -53,8 +53,9 @@ type healthResponse struct {
 	Status string `json:"status"`
 }
 
-// NewHandler builds the HTTP handler and registers its metrics with reg.
-func NewHandler(logger *slog.Logger, queue Enqueuer, db Pinger, reg *prometheus.Registry) (http.Handler, error) {
+// NewHandler builds the HTTP handler and registers its metrics with reg. now
+// is the clock that event timestamps are validated against.
+func NewHandler(logger *slog.Logger, queue Enqueuer, db Pinger, reg *prometheus.Registry, now func() time.Time) (http.Handler, error) {
 	m := ingestMetrics{
 		received: prometheus.NewCounter(prometheus.CounterOpts{
 			Namespace: "sink",
@@ -74,7 +75,7 @@ func NewHandler(logger *slog.Logger, queue Enqueuer, db Pinger, reg *prometheus.
 	}
 
 	mux := http.NewServeMux()
-	mux.Handle("POST /ingest", handleIngest(logger, queue, m))
+	mux.Handle("POST /ingest", handleIngest(logger, queue, m, now))
 	mux.Handle("GET /health", handleHealth(logger, db))
 	mux.Handle("GET /metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{Registry: reg}))
 	return mux, nil
@@ -94,7 +95,7 @@ func NewHandler(logger *slog.Logger, queue Enqueuer, db Pinger, reg *prometheus.
 //   - 503 while the service is shutting down.
 //
 // A 202 means the events are buffered, not yet written to ClickHouse.
-func handleIngest(logger *slog.Logger, queue Enqueuer, m ingestMetrics) http.Handler {
+func handleIngest(logger *slog.Logger, queue Enqueuer, m ingestMetrics, now func() time.Time) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		events, err := decodeEvents(w, r)
 		if err != nil {
@@ -107,7 +108,7 @@ func handleIngest(logger *slog.Logger, queue Enqueuer, m ingestMetrics) http.Han
 			return
 		}
 
-		if err := validate(events); err != nil {
+		if err := validate(events, now()); err != nil {
 			m.rejected.WithLabelValues("invalid").Add(float64(len(events)))
 			writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: err.Error()})
 			return
@@ -159,12 +160,12 @@ func decodeEvents(w http.ResponseWriter, r *http.Request) ([]event.Event, error)
 	return events, nil
 }
 
-func validate(events []event.Event) error {
+func validate(events []event.Event, now time.Time) error {
 	if len(events) == 0 {
 		return fmt.Errorf("%w: request contains no events", event.ErrInvalid)
 	}
 	for i := range events {
-		if err := events[i].Validate(); err != nil {
+		if err := events[i].Validate(now); err != nil {
 			return fmt.Errorf("event %d: %w", i, err)
 		}
 	}

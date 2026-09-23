@@ -14,6 +14,8 @@ import (
 	"github.com/Maksim-Burtsev/go-reading/apps/11-clickhouse-sink/internal/event"
 )
 
+const maxRetryBackoff = 10 * time.Second
+
 var (
 	// ErrBufferFull is returned by Enqueue when the buffer has no room for all events.
 	ErrBufferFull = errors.New("buffer full")
@@ -65,7 +67,7 @@ func New(cfg Config, ins Inserter, reg prometheus.Registerer, logger *slog.Logge
 		batchSize: prometheus.NewHistogram(prometheus.HistogramOpts{
 			Namespace: "sink",
 			Name:      "batch_size_events",
-			Help:      "Number of events per flushed batch.",
+			Help:      "Number of events per batch, stored or dropped.",
 			Buckets:   prometheus.ExponentialBuckets(1, 4, 8),
 		}),
 		flushDuration: prometheus.NewHistogram(prometheus.HistogramOpts{
@@ -127,9 +129,14 @@ func (b *Batcher) Enqueue(events []event.Event) error {
 
 // Run flushes buffered events whenever a batch fills up or the flush interval
 // elapses. When ctx is cancelled it stops accepting events, flushes what is
-// left within the drain timeout and returns.
+// left and returns; the drain timeout, counted from the cancellation, bounds
+// the flush in progress and the drain together.
 func (b *Batcher) Run(ctx context.Context) error {
-	flushCtx := context.WithoutCancel(ctx)
+	flushCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+	defer cancel()
+	stop := context.AfterFunc(ctx, func() { time.AfterFunc(b.cfg.DrainTimeout, cancel) })
+	defer stop()
+
 	ticker := time.NewTicker(b.cfg.FlushInterval)
 	defer ticker.Stop()
 
@@ -161,9 +168,6 @@ func (b *Batcher) drain(ctx context.Context, batch []event.Event) error {
 	b.closed = true
 	close(b.events)
 	b.mu.Unlock()
-
-	ctx, cancel := context.WithTimeout(ctx, b.cfg.DrainTimeout)
-	defer cancel()
 
 	b.logger.InfoContext(ctx, "draining buffer", "events", len(batch)+len(b.events))
 
@@ -215,6 +219,6 @@ func (b *Batcher) insertWithRetry(ctx context.Context, batch []event.Event) erro
 			return fmt.Errorf("insert retry aborted: %w", errors.Join(err, ctx.Err()))
 		case <-time.After(delay):
 		}
-		delay *= 2
+		delay = min(delay*2, maxRetryBackoff)
 	}
 }

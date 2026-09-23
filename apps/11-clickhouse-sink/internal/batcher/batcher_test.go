@@ -215,3 +215,34 @@ func TestRunRetries(t *testing.T) {
 		})
 	}
 }
+
+type stuckInserter struct {
+	started chan struct{}
+}
+
+func (s stuckInserter) InsertEvents(ctx context.Context, _ []event.Event) error {
+	select {
+	case s.started <- struct{}{}:
+	default:
+	}
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+func TestRunBoundsFlushInProgressOnShutdown(t *testing.T) {
+	t.Parallel()
+
+	cfg := testConfig()
+	cfg.DrainTimeout = 50 * time.Millisecond
+	ins := stuckInserter{started: make(chan struct{}, 1)}
+	b := newTestBatcher(t, cfg, ins)
+
+	require.NoError(t, b.Enqueue(make([]event.Event, cfg.BatchSize)))
+	stop := start(t, b)
+	<-ins.started
+
+	begun := time.Now()
+	require.NoError(t, stop())
+	require.Less(t, time.Since(begun), 10*cfg.DrainTimeout)
+	require.InDelta(t, float64(cfg.BatchSize), testutil.ToFloat64(b.dropped), 0)
+}

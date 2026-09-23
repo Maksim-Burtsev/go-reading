@@ -25,6 +25,7 @@ func validEvent() event.Event {
 func TestValidate(t *testing.T) {
 	t.Parallel()
 
+	now := time.Date(2026, 9, 21, 12, 0, 0, 0, time.UTC)
 	tests := []struct {
 		name    string
 		mutate  func(e *event.Event)
@@ -46,6 +47,17 @@ func TestValidate(t *testing.T) {
 			wantErr: "user_id exceeds 256 bytes",
 		},
 		{name: "missing ts", mutate: func(e *event.Event) { e.Timestamp = time.Time{} }, wantErr: "ts is required"},
+		{name: "ts 30 days old", mutate: func(e *event.Event) { e.Timestamp = now.AddDate(0, 0, -30) }},
+		{
+			name:    "ts too old",
+			mutate:  func(e *event.Event) { e.Timestamp = now.AddDate(0, 0, -30).Add(-time.Millisecond) },
+			wantErr: "ts is more than 30 days old",
+		},
+		{
+			name:    "ts too far ahead",
+			mutate:  func(e *event.Event) { e.Timestamp = now.Add(25 * time.Hour) },
+			wantErr: "ts is more than a day ahead",
+		},
 		{
 			name:    "array properties",
 			mutate:  func(e *event.Event) { e.Properties = json.RawMessage(`[1,2]`) },
@@ -64,7 +76,7 @@ func TestValidate(t *testing.T) {
 			e := validEvent()
 			tt.mutate(&e)
 
-			err := e.Validate()
+			err := e.Validate(now)
 			if tt.wantErr == "" {
 				require.NoError(t, err)
 				return
