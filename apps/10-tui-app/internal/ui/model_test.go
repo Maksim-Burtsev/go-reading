@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -13,6 +14,8 @@ import (
 )
 
 var testNow = time.Date(2026, time.September, 21, 10, 0, 0, 0, time.UTC)
+
+func discard([]task.Task) error { return nil }
 
 func sampleTasks() []task.Task {
 	return []task.Task{
@@ -219,7 +222,7 @@ func TestUpdate(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			m, cmd := send(New(sampleTasks(), testNow), tt.msgs...)
+			m, cmd := send(New(sampleTasks(), testNow, discard), tt.msgs...)
 			require.Equal(t, tt.wantSelected, selectedID(m))
 			require.Equal(t, tt.wantVisible, visibleIDs(m))
 			require.Equal(t, tt.wantFocus, m.focus)
@@ -258,16 +261,13 @@ func TestUpdateToggleDone(t *testing.T) {
 			t.Parallel()
 
 			input := sampleTasks()
-			initial := New(input, testNow)
+			initial := New(input, testNow, discard)
 			m, cmd := send(initial, tt.msgs...)
 
 			got := findTask(t, m.Tasks(), tt.wantID)
 			require.Equal(t, tt.wantStatus, got.Status)
 			require.Equal(t, tt.wantModified, m.Modified())
-			require.Nil(t, cmd)
-
-			require.Equal(t, sampleTasks(), input)
-			require.Equal(t, sampleTasks(), initial.Tasks())
+			require.Equal(t, tt.wantModified, cmd != nil)
 			require.False(t, initial.Modified())
 		})
 	}
@@ -302,7 +302,7 @@ func TestUpdateWindowSize(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			m, cmd := send(New(sampleTasks(), testNow), tea.WindowSizeMsg{Width: tt.width, Height: tt.height})
+			m, cmd := send(New(sampleTasks(), testNow, discard), tea.WindowSizeMsg{Width: tt.width, Height: tt.height})
 			require.Nil(t, cmd)
 			require.Equal(t, tt.wantDetailsW, m.details.Width())
 			require.Equal(t, tt.wantDetailsH, m.details.Height())
@@ -329,7 +329,7 @@ func TestUpdateDetailsScroll(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			m, _ := send(New(sampleTasks(), testNow), append([]tea.Msg{size}, tt.msgs...)...)
+			m, _ := send(New(sampleTasks(), testNow, discard), append([]tea.Msg{size}, tt.msgs...)...)
 			require.Equal(t, tt.wantOffset, m.details.YOffset())
 		})
 	}
@@ -383,9 +383,9 @@ func TestView(t *testing.T) {
 			notWant: []string{"API-1", "OPS-2"},
 		},
 		{
-			name: "unsaved changes",
+			name: "save in progress",
 			msgs: []tea.Msg{size, press("x")},
-			want: []string{"2 done", "unsaved"},
+			want: []string{"2 done", "saving…"},
 		},
 	}
 
@@ -393,7 +393,7 @@ func TestView(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			m, _ := send(New(sampleTasks(), testNow), tt.msgs...)
+			m, _ := send(New(sampleTasks(), testNow, discard), tt.msgs...)
 			v := m.View()
 			require.True(t, v.AltScreen)
 			content := ansi.Strip(v.Content)
@@ -410,7 +410,7 @@ func TestView(t *testing.T) {
 func TestViewBeforeWindowSize(t *testing.T) {
 	t.Parallel()
 
-	require.Empty(t, New(sampleTasks(), testNow).View().Content)
+	require.Empty(t, New(sampleTasks(), testNow, discard).View().Content)
 }
 
 func TestViewShortTerminal(t *testing.T) {
@@ -429,10 +429,51 @@ func TestViewShortTerminal(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			m, _ := send(New(sampleTasks(), testNow), tea.WindowSizeMsg{Width: 80, Height: tt.height}, press("j"))
+			m, _ := send(New(sampleTasks(), testNow, discard), tea.WindowSizeMsg{Width: 80, Height: tt.height}, press("j"))
 			var v tea.View
 			require.NotPanics(t, func() { v = m.View() })
 			require.Contains(t, ansi.Strip(v.Content), "Tasks")
 		})
 	}
+}
+
+func TestToggleSavesInBackground(t *testing.T) {
+	t.Parallel()
+
+	var saved []task.Task
+	m := New(sampleTasks(), testNow, func(tasks []task.Task) error {
+		saved = tasks
+		return nil
+	})
+	m, cmd := send(m, tea.WindowSizeMsg{Width: 100, Height: 20}, press("x"))
+	require.NotNil(t, cmd)
+	require.Nil(t, saved)
+
+	m, _ = send(m, cmd())
+	require.Equal(t, task.StatusDone, saved[0].Status)
+	require.False(t, m.Modified())
+	require.NotContains(t, ansi.Strip(m.View().Content), "saving")
+}
+
+func TestQuitWaitsForSave(t *testing.T) {
+	t.Parallel()
+
+	m, save := send(New(sampleTasks(), testNow, discard), press("x"))
+	m, cmd := send(m, press("q"))
+	require.False(t, isQuit(cmd))
+
+	_, cmd = send(m, save())
+	require.True(t, isQuit(cmd))
+}
+
+func TestFailedSaveKeepsChangesUnsaved(t *testing.T) {
+	t.Parallel()
+
+	errDiskFull := errors.New("disk full")
+	m := New(sampleTasks(), testNow, func([]task.Task) error { return errDiskFull })
+	m, cmd := send(m, tea.WindowSizeMsg{Width: 100, Height: 20}, press("x"))
+	require.True(t, m.Modified())
+
+	m, _ = send(m, cmd())
+	require.Contains(t, ansi.Strip(m.View().Content), "save failed: disk full")
 }

@@ -50,10 +50,13 @@ func (m Model) headerView() string {
 	if q := strings.TrimSpace(m.filter.Value()); q != "" && m.focus != focusFilter {
 		summary += fmt.Sprintf(" · filter %q", q)
 	}
-	if m.modified {
-		summary += " · unsaved"
-	}
 	line := m.styles.header.Render("Tasks") + " " + m.styles.muted.Render(summary)
+	switch {
+	case m.saving:
+		line += " " + m.styles.muted.Render("· saving…")
+	case m.saveErr != nil:
+		line += " " + m.styles.overdue.Render("save failed: "+m.saveErr.Error())
+	}
 	return ansi.Truncate(line, m.width, "…")
 }
 

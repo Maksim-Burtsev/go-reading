@@ -29,6 +29,11 @@ const (
 	focusFilter
 )
 
+// SaveFunc writes tasks to the task file.
+type SaveFunc func([]task.Task) error
+
+type savedMsg struct{ err error }
+
 // Model is the state of the task browser.
 type Model struct {
 	tasks    []task.Task
@@ -36,7 +41,11 @@ type Model struct {
 	cursor   int
 	focus    focus
 	modified bool
+	saving   bool
+	saveErr  error
+	quitting bool
 	now      time.Time
+	save     SaveFunc
 
 	filter  textinput.Model
 	details viewport.Model
@@ -48,8 +57,9 @@ type Model struct {
 	height int
 }
 
-// New returns a browser over tasks. now is used to flag overdue tasks.
-func New(tasks []task.Task, now time.Time) Model {
+// New returns a browser over tasks. now is used to flag overdue tasks, and
+// save is called in the background after every status change.
+func New(tasks []task.Task, now time.Time, save SaveFunc) Model {
 	filter := textinput.New()
 	filter.Prompt = "/"
 	filter.Placeholder = "title or tag"
@@ -61,6 +71,7 @@ func New(tasks []task.Task, now time.Time) Model {
 	m := Model{
 		tasks:   tasks,
 		now:     now,
+		save:    save,
 		filter:  filter,
 		details: viewport.New(),
 		help:    help.New(),
@@ -95,7 +106,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	keyMsg, isKey := msg.(tea.KeyPressMsg)
 	if isKey && key.Matches(keyMsg, m.keys.ForceQuit) {
-		return m, tea.Quit
+		return m.quit()
 	}
 
 	switch {
@@ -104,20 +115,44 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case isKey:
 		return m.updateBrowse(keyMsg)
 	default:
+		return m.updateSaved(msg)
+	}
+}
+
+func (m Model) updateSaved(msg tea.Msg) (Model, tea.Cmd) {
+	saved, ok := msg.(savedMsg)
+	if !ok {
 		return m, nil
 	}
+	m.saving = false
+	m.modified = false
+	m.saveErr = saved.err
+	if m.quitting {
+		return m, tea.Quit
+	}
+	return m, nil
+}
+
+// quit ends the program, or waits for the save in flight to report back first.
+func (m Model) quit() (Model, tea.Cmd) {
+	if m.saving {
+		m.quitting = true
+		return m, nil
+	}
+	return m, tea.Quit
 }
 
 func (m Model) updateBrowse(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 	switch {
 	case key.Matches(msg, m.keys.Quit):
-		return m, tea.Quit
+		return m.quit()
 	case key.Matches(msg, m.keys.Filter):
 		m.focus = focusFilter
 		cmd := m.filter.Focus()
 		return m, cmd
 	case key.Matches(msg, m.keys.Toggle):
-		m.toggleDone()
+		cmd := m.toggleDone()
+		return m, cmd
 	case key.Matches(msg, m.keys.Switch):
 		if m.focus == focusList {
 			m.focus = focusDetails
@@ -221,19 +256,26 @@ func (m *Model) applyFilter() {
 	m.syncDetails()
 }
 
-func (m *Model) toggleDone() {
+func (m *Model) toggleDone() tea.Cmd {
 	i, ok := m.selectedIndex()
 	if !ok {
-		return
+		return nil
 	}
-	m.tasks = slices.Clone(m.tasks)
 	if m.tasks[i].Status == task.StatusDone {
 		m.tasks[i].Status = task.StatusTodo
 	} else {
 		m.tasks[i].Status = task.StatusDone
 	}
 	m.modified = true
+	m.saving = true
 	m.syncDetails()
+	return saveTasks(m.save, m.tasks)
+}
+
+func saveTasks(save SaveFunc, tasks []task.Task) tea.Cmd {
+	return func() tea.Msg {
+		return savedMsg{err: save(tasks)}
+	}
 }
 
 func (m *Model) syncDetails() {

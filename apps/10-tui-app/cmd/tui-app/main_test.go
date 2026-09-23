@@ -24,12 +24,11 @@ func TestRun(t *testing.T) {
 		wantErrMsg string
 		wantID     string
 		wantStatus task.Status
-		wantSaved  bool
 	}{
 		{name: "quit without changes", stdin: "jjq", wantID: "PLAT-412", wantStatus: task.StatusInProgress},
-		{name: "toggle and quit saves", stdin: "xq", wantID: "PLAT-412", wantStatus: task.StatusDone, wantSaved: true},
-		{name: "ctrl+c quits and saves", stdin: "x\x03", wantID: "PLAT-412", wantStatus: task.StatusDone, wantSaved: true},
-		{name: "q types into the filter", stdin: "/opaque\rxq", wantID: "API-1031", wantStatus: task.StatusDone, wantSaved: true},
+		{name: "toggle and quit saves", stdin: "xq", wantID: "PLAT-412", wantStatus: task.StatusDone},
+		{name: "ctrl+c quits and saves", stdin: "x\x03", wantID: "PLAT-412", wantStatus: task.StatusDone},
+		{name: "q types into the filter", stdin: "/opaque\rxq", wantID: "API-1031", wantStatus: task.StatusDone},
 		{name: "help flag", args: []string{"-h"}, wantID: "PLAT-412", wantStatus: task.StatusInProgress},
 		{name: "unknown flag", args: []string{"-verbose"}, wantErrMsg: "parse flags"},
 		{name: "missing file", args: []string{"-file", "missing.json"}, wantErr: fs.ErrNotExist},
@@ -68,7 +67,6 @@ func TestRun(t *testing.T) {
 			i := slices.IndexFunc(tasks, func(tk task.Task) bool { return tk.ID == tt.wantID })
 			require.NotEqual(t, -1, i)
 			require.Equal(t, tt.wantStatus, tasks[i].Status)
-			require.Equal(t, tt.wantSaved, strings.Contains(stderr.String(), `"msg":"tasks saved"`))
 		})
 	}
 }

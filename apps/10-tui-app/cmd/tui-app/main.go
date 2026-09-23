@@ -57,8 +57,11 @@ func run(
 	}
 	logger.InfoContext(ctx, "tasks loaded", slog.String("path", *path), slog.Int("count", len(tasks)))
 
+	save := func(ts []task.Task) error {
+		return task.Save(ctx, *path, ts)
+	}
 	program := tea.NewProgram(
-		ui.New(tasks, time.Now()),
+		ui.New(tasks, time.Now(), save),
 		tea.WithContext(ctx),
 		tea.WithInput(stdin),
 		tea.WithOutput(stdout),
