@@ -34,7 +34,7 @@ func (r *Runner) Serve(ctx context.Context, entries []Entry, grace time.Duration
 		cron.WithSeconds(),
 		cron.WithLocation(time.UTC),
 		cron.WithLogger(logger),
-		cron.WithChain(cron.Recover(logger), cron.SkipIfStillRunning(logger)),
+		cron.WithChain(cron.SkipIfStillRunning(logger), cron.Recover(logger)),
 	)
 	for _, e := range entries {
 		if _, err := c.AddFunc(e.Spec, func() { r.Run(jobCtx, e.Name, e.Job) }); err != nil {

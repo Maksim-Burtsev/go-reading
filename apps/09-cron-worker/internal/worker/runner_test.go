@@ -52,6 +52,7 @@ func TestRunnerRun(t *testing.T) {
 		locker      fakeLocker
 		jobTakes    time.Duration
 		jobErr      error
+		jobPanic    any
 		wantRuns    int
 		wantUnlocks int
 		wantOutcome string
@@ -76,6 +77,16 @@ func TestRunnerRun(t *testing.T) {
 			wantUnlocks: 1,
 			wantOutcome: outcomeFailure,
 			wantSeconds: 0.25,
+		},
+		{
+			name:        "job panic",
+			locker:      fakeLocker{acquired: true},
+			jobTakes:    100 * time.Millisecond,
+			jobPanic:    "index out of range",
+			wantRuns:    1,
+			wantUnlocks: 1,
+			wantOutcome: outcomeFailure,
+			wantSeconds: 0.1,
 		},
 		{
 			name:        "unlock error",
@@ -111,6 +122,9 @@ func TestRunnerRun(t *testing.T) {
 			runner.Run(t.Context(), "purge", jobFunc(func(context.Context) error {
 				runs++
 				clock.Advance(tt.jobTakes)
+				if tt.jobPanic != nil {
+					panic(tt.jobPanic)
+				}
 				return tt.jobErr
 			}))
 

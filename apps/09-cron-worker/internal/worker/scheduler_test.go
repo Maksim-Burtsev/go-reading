@@ -83,6 +83,42 @@ func TestRunnerServe(t *testing.T) {
 	}
 }
 
+func TestRunnerServeKeepsSchedulingAPanickingJob(t *testing.T) {
+	t.Parallel()
+
+	locker := &fakeLocker{acquired: true}
+	runner, err := NewRunner(slog.New(slog.DiscardHandler), locker, &fakeClock{}, prometheus.NewRegistry())
+	require.NoError(t, err)
+
+	runs := make(chan struct{}, 2)
+	job := jobFunc(func(context.Context) error {
+		select {
+		case runs <- struct{}{}:
+		default:
+		}
+		panic("nil map write")
+	})
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	served := make(chan error, 1)
+	go func() {
+		served <- runner.Serve(ctx, []Entry{{Name: "job", Spec: "* * * * * *", Job: job}}, time.Second)
+	}()
+
+	for range 2 {
+		select {
+		case <-runs:
+		case <-time.After(3 * time.Second):
+			t.Fatal("the job was not run again after it panicked")
+		}
+	}
+	cancel()
+
+	require.NoError(t, <-served)
+	require.GreaterOrEqual(t, locker.unlocks, 2, "the lock was not released after a panic")
+}
+
 func TestRunnerServeRejectsInvalidSpec(t *testing.T) {
 	t.Parallel()
 

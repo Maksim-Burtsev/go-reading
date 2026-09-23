@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"runtime/debug"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -74,7 +75,8 @@ func NewRunner(logger *slog.Logger, locker Locker, clock Clock, reg prometheus.R
 }
 
 // Run executes job under the lock called name. The run is skipped when the
-// lock is held by another instance.
+// lock is held by another instance. A panic in job is recovered and recorded
+// as a failed run.
 func (r *Runner) Run(ctx context.Context, name string, job Job) {
 	logger := r.logger.With("job", name)
 	start := r.clock.Now()
@@ -90,7 +92,7 @@ func (r *Runner) Run(ctx context.Context, name string, job Job) {
 		return
 	}
 
-	err = job.Run(ctx)
+	err = runJob(ctx, job)
 
 	unlockCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), unlockTimeout)
 	defer cancel()
@@ -99,6 +101,15 @@ func (r *Runner) Run(ctx context.Context, name string, job Job) {
 	}
 
 	r.finish(ctx, logger, name, start, err)
+}
+
+func runJob(ctx context.Context, job Job) (err error) {
+	defer func() {
+		if p := recover(); p != nil {
+			err = fmt.Errorf("job panicked: %v\n%s", p, debug.Stack())
+		}
+	}()
+	return job.Run(ctx)
 }
 
 func (r *Runner) finish(ctx context.Context, logger *slog.Logger, name string, start time.Time, err error) {

@@ -1,6 +1,11 @@
-// Command cron-worker runs periodic database maintenance jobs. Each job holds a
-// PostgreSQL advisory lock while it runs, so any number of instances can be
-// deployed without a job running twice at the same time.
+// Command cron-worker runs periodic database maintenance jobs. Before a run,
+// the instance takes a PostgreSQL advisory lock named after the job and skips
+// the run if another instance holds it, so any number of instances can be
+// deployed. At most one instance holds a job's lock at a time, but the job's
+// statements run on other connections, so runs can still overlap when the
+// lock's connection is lost or a cancelled statement is still executing, and a
+// run can repeat right after another instance's. Jobs must tolerate overlapping
+// and repeated runs.
 package main
 
 import (
