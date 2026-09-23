@@ -107,8 +107,8 @@ func loadConfig(getenv func(string) string) (config, error) {
 		return config{}, fmt.Errorf("parse config: %w", err)
 	}
 
-	if cfg.HandlerTimeout >= cfg.WriteTimeout {
-		return config{}, fmt.Errorf("handler timeout %s must be shorter than write timeout %s", cfg.HandlerTimeout, cfg.WriteTimeout)
+	if cfg.HandlerTimeout <= 0 || cfg.HandlerTimeout >= cfg.WriteTimeout {
+		return config{}, fmt.Errorf("handler timeout %s must be positive and shorter than write timeout %s", cfg.HandlerTimeout, cfg.WriteTimeout)
 	}
 	return cfg, nil
 }

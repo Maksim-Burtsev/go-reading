@@ -68,7 +68,12 @@ func TestLoadConfig(t *testing.T) {
 		{
 			name:    "handler timeout not shorter than write timeout",
 			env:     map[string]string{"HANDLER_TIMEOUT": "15s"},
-			wantErr: "must be shorter than write timeout",
+			wantErr: "shorter than write timeout",
+		},
+		{
+			name:    "zero handler timeout",
+			env:     map[string]string{"HANDLER_TIMEOUT": "0s"},
+			wantErr: "must be positive",
 		},
 	}
 

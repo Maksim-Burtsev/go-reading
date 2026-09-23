@@ -128,7 +128,10 @@ func decodeError(err error) error {
 	case errors.As(err, &syntaxErr), errors.Is(err, io.ErrUnexpectedEOF):
 		return badRequest("invalid_json", "request body contains malformed JSON")
 	case errors.As(err, &typeErr):
-		return badRequest("invalid_json", fmt.Sprintf("field %q must be of type %s", typeErr.Field, typeErr.Type))
+		if typeErr.Field == "" {
+			return badRequest("invalid_json", "request body must be a JSON object")
+		}
+		return badRequest("invalid_json", fmt.Sprintf("field %q cannot hold a JSON %s", typeErr.Field, typeErr.Value))
 	case strings.HasPrefix(err.Error(), "json: unknown field "):
 		return badRequest("unknown_field", "request body contains "+strings.TrimPrefix(err.Error(), "json: "))
 	default:

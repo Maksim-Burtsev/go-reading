@@ -40,11 +40,12 @@ func TestCreateNote(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name       string
-		body       string
-		wantStatus int
-		wantCode   string
-		wantFields []fieldError
+		name        string
+		body        string
+		wantStatus  int
+		wantCode    string
+		wantMessage string
+		wantFields  []fieldError
 	}{
 		{
 			name:       "valid",
@@ -69,10 +70,18 @@ func TestCreateNote(t *testing.T) {
 			wantCode:   "invalid_json",
 		},
 		{
-			name:       "wrong field type",
-			body:       `{"title":42}`,
-			wantStatus: http.StatusBadRequest,
-			wantCode:   "invalid_json",
+			name:        "wrong field type",
+			body:        `{"title":42}`,
+			wantStatus:  http.StatusBadRequest,
+			wantCode:    "invalid_json",
+			wantMessage: `field "title" cannot hold a JSON number`,
+		},
+		{
+			name:        "array instead of object",
+			body:        `[]`,
+			wantStatus:  http.StatusBadRequest,
+			wantCode:    "invalid_json",
+			wantMessage: "request body must be a JSON object",
 		},
 		{
 			name:       "unknown field",
@@ -143,6 +152,9 @@ func TestCreateNote(t *testing.T) {
 			if tt.wantCode != "" {
 				resp := decodeBody[errorResponse](t, rec)
 				require.Equal(t, tt.wantCode, resp.Error.Code)
+				if tt.wantMessage != "" {
+					require.Equal(t, tt.wantMessage, resp.Error.Message)
+				}
 				require.Equal(t, tt.wantFields, resp.Error.Fields)
 				require.Empty(t, store.List())
 				return
