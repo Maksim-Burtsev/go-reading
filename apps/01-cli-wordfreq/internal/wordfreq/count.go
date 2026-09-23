@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -16,6 +17,8 @@ import (
 	"golang.org/x/sync/errgroup"
 	"golang.org/x/text/cases"
 )
+
+const maxWordSize = 16 << 20
 
 // Counts maps a case-folded word to the number of its occurrences.
 type Counts map[string]int
@@ -64,6 +67,7 @@ func Count(r io.Reader, minLen int) (Counts, error) {
 	fold := cases.Fold()
 	counts := make(Counts)
 	sc := bufio.NewScanner(r)
+	sc.Buffer(make([]byte, 0, 64<<10), maxWordSize)
 	sc.Split(ScanWords)
 	for sc.Scan() {
 		word := fold.String(sc.Text())
@@ -87,7 +91,8 @@ type Opener interface {
 type Options struct {
 	// MinLen is the minimum length of a counted word, in runes.
 	MinLen int
-	// Jobs is the maximum number of inputs read at the same time.
+	// Jobs is the maximum number of inputs read at the same time. Values
+	// below 1 mean runtime.GOMAXPROCS(0).
 	Jobs int
 }
 
@@ -95,8 +100,12 @@ type Options struct {
 // inputs concurrently. The first failure cancels the remaining reads and is
 // returned.
 func CountAll(ctx context.Context, open Opener, names []string, opts Options) (Counts, error) {
+	jobs := opts.Jobs
+	if jobs < 1 {
+		jobs = runtime.GOMAXPROCS(0)
+	}
 	g, ctx := errgroup.WithContext(ctx)
-	g.SetLimit(opts.Jobs)
+	g.SetLimit(jobs)
 
 	var mu sync.Mutex
 	total := make(Counts)

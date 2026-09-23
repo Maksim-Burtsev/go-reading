@@ -51,7 +51,7 @@ func ScanWords(data []byte, atEOF bool) (advance int, token []byte, err error) {
 }
 
 func isWordRune(r rune) bool {
-	return unicode.IsLetter(r) || unicode.IsNumber(r) || unicode.Is(unicode.Mn, r)
+	return unicode.IsLetter(r) || unicode.IsNumber(r) || unicode.IsMark(r)
 }
 
 func isJoiner(r rune) bool {

@@ -6,7 +6,6 @@ import (
 	"errors"
 	"io"
 	"os"
-	"path/filepath"
 	"slices"
 )
 
@@ -40,7 +39,7 @@ func (o Opener) Open(ctx context.Context, name string) (io.ReadCloser, error) {
 	if name == Stdin {
 		return io.NopCloser(&contextReader{ctx: ctx, r: o.Stdin}), nil
 	}
-	f, err := os.Open(filepath.Clean(name))
+	f, err := os.Open(name) //nolint:gosec // G304: reading the files the user names is the point
 	if err != nil {
 		return nil, err
 	}

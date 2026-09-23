@@ -41,6 +41,7 @@ func TestScanWords(t *testing.T) {
 		{name: "outer joiners", in: "'quoted' -dash- rock--roll", want: []string{"quoted", "dash", "rock", "roll"}},
 		{name: "trailing joiner", in: "rock-", want: []string{"rock"}},
 		{name: "combining mark", in: "cafe\u0301 ok", want: []string{"cafe\u0301", "ok"}},
+		{name: "spacing marks", in: "भारत हिन्दी", want: []string{"भारत", "हिन्दी"}},
 		{name: "invalid utf-8", in: "ab\xffcd", want: []string{"ab", "cd"}},
 		{name: "mixed scripts", in: "Go и Питон", want: []string{"Go", "и", "Питон"}},
 	}

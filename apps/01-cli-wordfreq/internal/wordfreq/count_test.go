@@ -43,6 +43,7 @@ func TestCount(t *testing.T) {
 		{name: "cyrillic", in: "Мир мир МИР. Ёж ёж", minLen: 1, want: Counts{"мир": 3, "ёж": 2}},
 		{name: "full case folding", in: "Straße STRASSE", minLen: 1, want: Counts{"strasse": 2}},
 		{name: "min length in runes", in: "a an the ёж кот", minLen: 3, want: Counts{"the": 1, "кот": 1}},
+		{name: "word over the default token size", in: strings.Repeat("ab", 50_000), minLen: 1, want: Counts{strings.Repeat("ab", 50_000): 1}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -117,6 +118,7 @@ func TestCountAll(t *testing.T) {
 		{name: "sequential", names: []string{"a", "b", "c"}, opts: Options{MinLen: 1, Jobs: 1}, want: merged},
 		{name: "concurrent", names: []string{"a", "b", "c"}, opts: Options{MinLen: 1, Jobs: 3}, want: merged},
 		{name: "min length", names: []string{"a", "b"}, opts: Options{MinLen: 4, Jobs: 2}, want: Counts{}},
+		{name: "zero options", names: []string{"a", "b", "c"}, opts: Options{}, want: merged},
 		{name: "missing input", names: []string{"a", "missing"}, opts: Options{MinLen: 1, Jobs: 2}, wantErr: fs.ErrNotExist},
 		{name: "read error", names: []string{"a", brokenInput}, opts: Options{MinLen: 1, Jobs: 2}, wantErr: errBroken},
 	}
