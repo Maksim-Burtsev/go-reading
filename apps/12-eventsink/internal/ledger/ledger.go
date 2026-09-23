@@ -28,8 +28,9 @@ type Status string
 
 // Batch outcomes.
 const (
-	StatusInserted     Status = "inserted"
-	StatusDeadLettered Status = "dead_lettered"
+	StatusInserted              Status = "inserted"
+	StatusPartiallyDeadLettered Status = "partially_dead_lettered"
+	StatusDeadLettered          Status = "dead_lettered"
 )
 
 // Batch describes one flushed batch.

@@ -2,7 +2,7 @@
 
 A Kafka-to-ClickHouse sink. It reads JSON events from a Kafka topic as a member of a consumer group,
 writes them to ClickHouse in batches, records every flushed batch in Postgres and commits the batch's
-offsets only after both writes succeeded. Records that are not valid events, and batches ClickHouse
+offsets only after both writes succeeded. Records that are not valid events, and events ClickHouse
 keeps rejecting, go to a dead-letter topic. Delivery is at-least-once; the ClickHouse table collapses
 replayed events. The service exposes `/health` and `/metrics` on one HTTP port.
 
@@ -36,9 +36,10 @@ flowchart LR
 
 One goroutine runs the pipeline, and a flush takes the numbered steps in order. It stops at the first
 step that fails and leaves the batch uncommitted, so the batch is read again after a restart or a
-rebalance. The insert and the ledger write are retried with capped exponential backoff; dead letters
-are the records that do not decode, plus the whole batch once the insert has run out of attempts, and
-carry headers with the original topic, partition, offset and error. The `batches` row holds the
+rebalance. The insert and the ledger write are retried with capped exponential backoff. When the
+insert runs out of attempts, the batch is split in halves and each half is inserted the same way, down
+to single events. Dead letters are the records that do not decode, plus the events ClickHouse refuses
+even on their own, and carry headers with the original topic, partition, offset and error. The `batches` row holds the
 status, the record and dead-letter counts, the insert duration, and the first and last offset taken
 from each partition.
 
@@ -129,8 +130,9 @@ that takes over its partitions. The compose service sets `stop_grace_period` abo
 | Metric | Type | Labels |
 |---|---|---|
 | `eventsink_records_consumed_total` | counter | |
-| `eventsink_batches_flushed_total` | counter | `outcome`: `inserted`, `dead_lettered` |
+| `eventsink_batches_flushed_total` | counter | `outcome`: `inserted`, `partially_dead_lettered`, `dead_lettered` |
 | `eventsink_dead_letters_total` | counter | `reason`: `invalid`, `insert_failed` |
+| `eventsink_rejected_events` | gauge | |
 | `eventsink_batch_size_records` | histogram | |
 | `eventsink_flush_duration_seconds` | histogram | |
 

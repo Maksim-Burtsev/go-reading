@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"testing"
 	"time"
 
@@ -25,6 +26,7 @@ const (
 
 var (
 	errClickHouseDown = errors.New("clickhouse down")
+	errRejected       = errors.New("clickhouse rejected the block")
 	errPostgresDown   = errors.New("postgres down")
 	errBroker         = errors.New("broker unavailable")
 	errCoordinator    = errors.New("coordinator not available")
@@ -84,6 +86,7 @@ func (f *fakeClient) AllowRebalance() {}
 type fakeInserter struct {
 	failures int
 	hang     bool
+	reject   []string
 	calls    int
 	inserted []string
 }
@@ -100,6 +103,11 @@ func (f *fakeInserter) InsertEvents(ctx context.Context, events []event.Event) e
 	}
 	if f.calls <= f.failures {
 		return errClickHouseDown
+	}
+	for _, e := range events {
+		if slices.Contains(f.reject, e.ID) {
+			return errRejected
+		}
 	}
 	for _, e := range events {
 		f.inserted = append(f.inserted, e.ID)
@@ -158,6 +166,7 @@ func TestPipelineRun(t *testing.T) {
 		shutdownTimeout time.Duration
 		insertFailures  int
 		insertHangs     bool
+		reject          []string
 		ledgerFailures  int
 		commitFailures  int
 		produceErr      error
@@ -243,11 +252,39 @@ func TestPipelineRun(t *testing.T) {
 			wantCommits: [][]string{{"0/10"}},
 		},
 		{
-			name:           "batch is dead-lettered after max attempts",
+			name:           "insert that recovers after max attempts is not split",
 			records:        records(0, validEvent("a"), validEvent("b")),
 			insertFailures: 3,
-			wantDead:       []string{"0/10", "0/11"},
-			wantDeadError:  "clickhouse down",
+			wantInserted:   []string{"a", "b"},
+			wantBatches: []ledger.Batch{{
+				Status:     ledger.StatusInserted,
+				Records:    2,
+				Partitions: []ledger.Partition{{Topic: topic, Partition: 0, FirstOffset: 10, LastOffset: 11, Records: 2}},
+			}},
+			wantCommits: [][]string{{"0/10", "0/11"}},
+		},
+		{
+			name:          "only the rejected event is dead-lettered",
+			records:       records(0, validEvent("a"), validEvent("b"), validEvent("c")),
+			reject:        []string{"a"},
+			wantInserted:  []string{"b", "c"},
+			wantDead:      []string{"0/10"},
+			wantDeadError: "clickhouse rejected the block",
+			wantBatches: []ledger.Batch{{
+				Status:       ledger.StatusPartiallyDeadLettered,
+				Records:      3,
+				DeadLettered: 1,
+				Partitions:   []ledger.Partition{{Topic: topic, Partition: 0, FirstOffset: 10, LastOffset: 12, Records: 3}},
+			}},
+			wantCommits: [][]string{{"0/10", "0/11", "0/12"}},
+			wantMetrics: map[string]float64{"dead_letters_total/insert_failed": 1, "batches_flushed_total/partially_dead_lettered": 1},
+		},
+		{
+			name:          "batch ClickHouse keeps rejecting is dead-lettered event by event",
+			records:       records(0, validEvent("a"), validEvent("b")),
+			reject:        []string{"a", "b"},
+			wantDead:      []string{"0/10", "0/11"},
+			wantDeadError: "clickhouse rejected the block",
 			wantBatches: []ledger.Batch{{
 				Status:       ledger.StatusDeadLettered,
 				Records:      2,
@@ -348,7 +385,7 @@ func TestPipelineRun(t *testing.T) {
 			defer cancel()
 
 			client := &fakeClient{queue: tt.records, stop: cancel, produceErr: tt.produceErr, commitFailures: tt.commitFailures}
-			inserter := &fakeInserter{failures: tt.insertFailures, hang: tt.insertHangs}
+			inserter := &fakeInserter{failures: tt.insertFailures, hang: tt.insertHangs, reject: tt.reject}
 			batches := &fakeLedger{failures: tt.ledgerFailures}
 			reg := prometheus.NewRegistry()
 			p, err := pipeline.New(client, inserter, batches, pipeline.Config{

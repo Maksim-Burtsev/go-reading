@@ -42,7 +42,8 @@ type Client interface {
 }
 
 // Inserter stores events. A batch is inserted again after a failed attempt or
-// a restart, so the store must collapse duplicate events.
+// a restart, and in parts after the whole of it was refused, so the store must
+// collapse duplicate events.
 type Inserter interface {
 	InsertEvents(ctx context.Context, events []event.Event) error
 }
@@ -65,7 +66,7 @@ type Config struct {
 }
 
 // Pipeline consumes records on a single goroutine with at-least-once
-// delivery. Records that are not valid events, and batches the Inserter keeps
+// delivery. Records that are not valid events, and events the Inserter keeps
 // rejecting, go to the dead-letter topic.
 type Pipeline struct {
 	client   Client
@@ -84,10 +85,16 @@ type pending struct {
 	err    error
 }
 
+type rejection struct {
+	index int
+	err   error
+}
+
 type metrics struct {
 	consumed      prometheus.Counter
 	flushed       *prometheus.CounterVec
 	deadLettered  *prometheus.CounterVec
+	rejected      prometheus.Gauge
 	batchSize     prometheus.Histogram
 	flushDuration prometheus.Histogram
 }
@@ -117,6 +124,9 @@ func New(client Client, events Inserter, ledger Recorder, cfg Config, reg promet
 		deadLettered: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: ns, Name: "dead_letters_total", Help: "Records produced to the dead-letter topic, by reason.",
 		}, []string{"reason"}),
+		rejected: prometheus.NewGauge(prometheus.GaugeOpts{
+			Namespace: ns, Name: "rejected_events", Help: "Events the Inserter refused even on their own.",
+		}),
 		batchSize: prometheus.NewHistogram(prometheus.HistogramOpts{
 			Namespace: ns, Name: "batch_size_records", Help: "Records per flushed batch.",
 			Buckets: prometheus.ExponentialBuckets(1, 4, 8),
@@ -126,7 +136,7 @@ func New(client Client, events Inserter, ledger Recorder, cfg Config, reg promet
 			Buckets: prometheus.DefBuckets,
 		}),
 	}
-	for _, c := range []prometheus.Collector{m.consumed, m.flushed, m.deadLettered, m.batchSize, m.flushDuration} {
+	for _, c := range []prometheus.Collector{m.consumed, m.flushed, m.deadLettered, m.rejected, m.batchSize, m.flushDuration} {
 		if err := reg.Register(c); err != nil {
 			return nil, fmt.Errorf("register pipeline metric: %w", err)
 		}
@@ -216,6 +226,7 @@ func (p *Pipeline) flush(ctx context.Context) error {
 	records := make([]*kgo.Record, 0, len(items))
 	var (
 		events []event.Event
+		valid  []*kgo.Record
 		dead   []*kgo.Record
 	)
 	for _, it := range items {
@@ -225,24 +236,25 @@ func (p *Pipeline) flush(ctx context.Context) error {
 			continue
 		}
 		events = append(events, it.event)
+		valid = append(valid, it.record)
 	}
 	invalid := len(dead)
 
 	batch := ledger.Batch{Status: ledger.StatusInserted, Records: len(records), Partitions: partitions(records)}
-	err := p.retry(ctx, "insert events", func(ctx context.Context) error {
-		return p.events.InsertEvents(ctx, events)
-	})
+	rejected, err := p.insert(ctx, events)
 	batch.InsertDuration = time.Since(start)
 	if err != nil {
-		if !errors.Is(err, errExhausted) || ctx.Err() != nil {
-			return fmt.Errorf("insert %d events: %w", len(events), err)
+		return fmt.Errorf("insert %d events: %w", len(events), err)
+	}
+	p.metrics.rejected.Set(float64(len(rejected)))
+	if len(rejected) > 0 {
+		p.logger.ErrorContext(ctx, "dead-lettering rejected events", "events", len(rejected))
+		batch.Status = ledger.StatusPartiallyDeadLettered
+		if len(rejected) == len(events) {
+			batch.Status = ledger.StatusDeadLettered
 		}
-		p.logger.ErrorContext(ctx, "dead-lettering batch", "events", len(events), "error", err)
-		batch.Status = ledger.StatusDeadLettered
-		for _, it := range items {
-			if it.err == nil {
-				dead = append(dead, p.deadLetter(it.record, err))
-			}
+		for i := range rejected {
+			dead = append(dead, p.deadLetter(valid[i], rejected[i].err))
 		}
 	}
 
@@ -275,6 +287,42 @@ func (p *Pipeline) flush(ctx context.Context) error {
 		return fmt.Errorf("%w for %d records: %w", errCommit, len(records), commitErr)
 	}
 	return nil
+}
+
+// insert stores events. When an insert runs out of attempts, the events are
+// split in halves and each half is inserted the same way, down to single
+// events, so a few events ClickHouse refuses do not take the rest of the batch
+// to the dead-letter topic. It returns the events that were refused on their
+// own, with the error of their last attempt.
+func (p *Pipeline) insert(ctx context.Context, events []event.Event) ([]rejection, error) {
+	if len(events) == 0 {
+		return nil, nil
+	}
+	err := p.retry(ctx, "insert events", func(ctx context.Context) error {
+		return p.events.InsertEvents(ctx, events)
+	})
+	switch {
+	case err == nil:
+		return nil, nil
+	case !errors.Is(err, errExhausted) || ctx.Err() != nil:
+		return nil, err
+	case len(events) == 1:
+		return []rejection{{index: 0, err: err}}, nil
+	}
+
+	mid := len(events) / 2
+	left, err := p.insert(ctx, events[:mid])
+	if err != nil {
+		return nil, err
+	}
+	right, err := p.insert(ctx, events[mid:])
+	if err != nil {
+		return nil, err
+	}
+	for i := range right {
+		right[i].index += mid
+	}
+	return append(left, right...), nil
 }
 
 func (p *Pipeline) retry(ctx context.Context, op string, fn func(ctx context.Context) error) error {

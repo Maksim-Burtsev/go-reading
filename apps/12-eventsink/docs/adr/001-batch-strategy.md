@@ -25,9 +25,10 @@ merges their parts.
 
 **Dead-letter after N attempts.** Every call a flush makes is bounded by `ATTEMPT_TIMEOUT`, and the
 insert and the ledger write get `MAX_ATTEMPTS` attempts with exponential backoff capped at 10 s.
-Records that do not decode go to the dead-letter topic with their batch; when the insert runs out of
-attempts, the whole batch goes there, with headers naming the original topic, partition, offset and
-the last error, and is committed. If shutdown cuts a failing insert short, nothing is dead-lettered
+Records that do not decode go to the dead-letter topic with their batch. When the insert runs out of
+attempts, the batch is split in halves and each half is inserted the same way, down to single events;
+the events refused even on their own go there, with headers naming the original topic, partition,
+offset and the last error, and the batch is committed. If shutdown cuts a failing insert short, nothing is dead-lettered
 or committed. If the ledger write runs out of attempts, the pipeline stops without committing.
 
 **Rebalances wait for the pending batch.** The client polls with `BlockRebalanceOnPoll` and calls
