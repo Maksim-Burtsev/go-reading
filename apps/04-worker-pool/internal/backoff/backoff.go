@@ -3,6 +3,7 @@ package backoff
 
 import (
 	"context"
+	"math/rand/v2"
 	"time"
 )
 
@@ -13,7 +14,7 @@ type Policy struct {
 	// Max caps the delay ceiling of every retry.
 	Max time.Duration
 	// Rand returns a uniformly distributed integer in [0, n). It must be safe
-	// for concurrent use.
+	// for concurrent use. Nil means rand.Int64N from math/rand/v2.
 	Rand func(n int64) int64
 }
 
@@ -26,6 +27,9 @@ func (p Policy) Delay(retry int) time.Duration {
 	}
 	if ceiling <= 0 {
 		return 0
+	}
+	if p.Rand == nil {
+		return time.Duration(rand.Int64N(int64(ceiling))) //nolint:gosec // G404: jitter needs no cryptographic source
 	}
 	return time.Duration(p.Rand(int64(ceiling)))
 }

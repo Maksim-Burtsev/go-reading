@@ -74,7 +74,7 @@ func (r *Recorder) Get(id string) (Record, bool) {
 // Run applies results until the channel is closed, evicting expired records
 // along the way.
 func (r *Recorder) Run(results <-chan dispatch.Result) {
-	ticker := time.NewTicker(r.retention)
+	ticker := time.NewTicker(min(r.retention, time.Minute))
 	defer ticker.Stop()
 
 	for {

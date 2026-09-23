@@ -2,7 +2,6 @@ package backoff_test
 
 import (
 	"context"
-	"math/rand/v2"
 	"testing"
 	"time"
 
@@ -72,7 +71,7 @@ func TestPolicyDelay(t *testing.T) {
 func TestPolicyDelayStaysWithinCeiling(t *testing.T) {
 	t.Parallel()
 
-	policy := backoff.Policy{Base: 50 * time.Millisecond, Max: 2 * time.Second, Rand: rand.Int64N}
+	policy := backoff.Policy{Base: 50 * time.Millisecond, Max: 2 * time.Second}
 	for retry := range 12 {
 		ceiling := min(policy.Max, policy.Base<<retry)
 		for range 100 {

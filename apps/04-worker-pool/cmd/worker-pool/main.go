@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"math/rand/v2"
 	"net"
 	"net/http"
 	"os"
@@ -113,7 +112,7 @@ func run(ctx context.Context, _ []string, getenv func(string) string, stdout, _ 
 		Workers:        cfg.Workers,
 		MaxAttempts:    cfg.MaxAttempts,
 		AttemptTimeout: cfg.AttemptTimeout,
-		Backoff:        backoff.Policy{Base: cfg.BackoffBase, Max: cfg.BackoffMax, Rand: rand.Int64N},
+		Backoff:        backoff.Policy{Base: cfg.BackoffBase, Max: cfg.BackoffMax},
 	}, logger)
 
 	workCtx, abort := context.WithCancel(context.WithoutCancel(ctx))

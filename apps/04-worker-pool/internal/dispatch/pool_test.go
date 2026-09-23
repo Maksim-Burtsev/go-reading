@@ -214,20 +214,24 @@ func TestPoolCancellation(t *testing.T) {
 			}))
 			t.Cleanup(srv.Close)
 
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+
 			cfg := testConfig()
 			cfg.Workers = 1
 			if tt.backoff > 0 {
-				cfg.Backoff = backoff.Policy{Base: tt.backoff, Max: tt.backoff, Rand: func(n int64) int64 { return n - 1 }}
+				cfg.Backoff = backoff.Policy{Base: tt.backoff, Max: tt.backoff, Rand: func(n int64) int64 {
+					cancel()
+					return n - 1
+				}}
+			} else {
+				go func() {
+					<-started
+					cancel()
+				}()
 			}
 			q := newQueue(t, srv, 3)
 			q.Close()
-
-			ctx, cancel := context.WithCancel(t.Context())
-			defer cancel()
-			go func() {
-				<-started
-				cancel()
-			}()
 
 			results, err := collect(ctx, newPool(srv, cfg), q.Tasks())
 			require.ErrorIs(t, err, context.Canceled)
